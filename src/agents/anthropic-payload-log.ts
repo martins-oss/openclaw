@@ -26,6 +26,7 @@ type PayloadLogEvent = {
   usage?: Record<string, unknown>;
   error?: string;
   payloadDigest?: string;
+  idempotencyKey?: string;
 };
 
 type PayloadLogConfig = {
@@ -124,11 +125,17 @@ export function createAnthropicPayloadLogger(params: {
   };
 
   const record = (event: PayloadLogEvent) => {
+    const idempotencySource =
+      event.stage === "request"
+        ? event.payloadDigest
+        : digest(event.usage ?? event.error ?? event.stage);
+    const idempotencyKey = `anthropic-payload:${base.runId ?? base.sessionId ?? base.sessionKey ?? "unknown"}:${event.stage}:${idempotencySource ?? "none"}`;
+    event.idempotencyKey = idempotencyKey;
     const line = safeJsonStringify(event);
     if (!line) {
       return;
     }
-    writer.write(`${line}\n`);
+    writer.write(`${line}\n`, { idempotencyKey });
   };
 
   const wrapStreamFn: AnthropicPayloadLogger["wrapStreamFn"] = (streamFn) => {

@@ -45,6 +45,7 @@ export type CacheTraceEvent = {
   systemDigest?: string;
   note?: string;
   error?: string;
+  idempotencyKey?: string;
 };
 
 export type CacheTrace = {
@@ -230,11 +231,13 @@ export function createCacheTrace(params: CacheTraceInit): CacheTrace | null {
       event.error = payload.error;
     }
 
+    const idempotencyKey = `cache-trace:${base.runId ?? base.sessionId ?? base.sessionKey ?? "unknown"}:${event.seq}:${event.stage}`;
+    event.idempotencyKey = idempotencyKey;
     const line = safeJsonStringify(event);
     if (!line) {
       return;
     }
-    writer.write(`${line}\n`);
+    writer.write(`${line}\n`, { idempotencyKey });
   };
 
   const wrapStreamFn: CacheTrace["wrapStreamFn"] = (streamFn) => {

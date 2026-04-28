@@ -24,9 +24,53 @@ describe("getQueuedFileWriter", () => {
       resolveQueuedFileAppendFlags({
         O_APPEND: 0x01,
         O_CREAT: 0x02,
-        O_WRONLY: 0x04,
+        O_RDWR: 0x04,
       }),
     ).toBe(0x07);
+  });
+
+  it("deduplicates replayed appends by idempotency key", async () => {
+    const tmpDir = makeTempDir();
+    const filePath = path.join(tmpDir, "trace.jsonl");
+    const writer = getQueuedFileWriter(new Map(), filePath);
+
+    writer.write('{"idempotencyKey":"event-1","message":"first"}\n', {
+      idempotencyKey: "event-1",
+    });
+    writer.write('{"idempotencyKey":"event-1","message":"duplicate"}\n', {
+      idempotencyKey: "event-1",
+    });
+    writer.write('{"idempotencyKey":"event-2","message":"second"}\n', {
+      idempotencyKey: "event-2",
+    });
+    await writer.flush();
+
+    expect(fs.readFileSync(filePath, "utf8")).toBe(
+      '{"idempotencyKey":"event-1","message":"first"}\n' +
+        '{"idempotencyKey":"event-2","message":"second"}\n',
+    );
+  });
+
+  it("deduplicates already-persisted appends after writer restart", async () => {
+    const tmpDir = makeTempDir();
+    const filePath = path.join(tmpDir, "trace.jsonl");
+    fs.writeFileSync(filePath, '{"idempotencyKey":"event-1","message":"persisted"}\n', {
+      mode: 0o600,
+    });
+    const writer = getQueuedFileWriter(new Map(), filePath);
+
+    writer.write('{"idempotencyKey":"event-1","message":"replayed"}\n', {
+      idempotencyKey: "event-1",
+    });
+    writer.write('{"idempotencyKey":"event-2","message":"new"}\n', {
+      idempotencyKey: "event-2",
+    });
+    await writer.flush();
+
+    expect(fs.readFileSync(filePath, "utf8")).toBe(
+      '{"idempotencyKey":"event-1","message":"persisted"}\n' +
+        '{"idempotencyKey":"event-2","message":"new"}\n',
+    );
   });
 
   it("creates log files with restrictive permissions", async () => {

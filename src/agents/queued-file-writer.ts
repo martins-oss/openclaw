@@ -2,9 +2,18 @@ import nodeFs from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
 
+export type QueuedFileWriteOptions = {
+  /**
+   * Stable event key for replay-safe append logs. When present, the writer
+   * skips the append if the target JSONL file already contains a line with
+   * the same top-level `idempotencyKey`.
+   */
+  idempotencyKey?: string;
+};
+
 export type QueuedFileWriter = {
   filePath: string;
-  write: (line: string) => void;
+  write: (line: string, options?: QueuedFileWriteOptions) => void;
   flush: () => Promise<void>;
 };
 
@@ -14,7 +23,7 @@ export type QueuedFileWriterOptions = {
 
 type QueuedFileAppendFlagConstants = Pick<
   typeof nodeFs.constants,
-  "O_APPEND" | "O_CREAT" | "O_WRONLY"
+  "O_APPEND" | "O_CREAT" | "O_RDWR"
 > &
   Partial<Pick<typeof nodeFs.constants, "O_NOFOLLOW">>;
 
@@ -25,7 +34,7 @@ export function resolveQueuedFileAppendFlags(
   return (
     constants.O_CREAT |
     constants.O_APPEND |
-    constants.O_WRONLY |
+    constants.O_RDWR |
     (typeof noFollow === "number" ? noFollow : 0)
   );
 }
@@ -67,10 +76,30 @@ function verifyStableOpenedFile(params: {
   }
 }
 
+function hasJsonlIdempotencyKey(content: string, idempotencyKey: string): boolean {
+  for (const rawLine of content.split("\n")) {
+    const trimmed = rawLine.trim();
+    if (!trimmed) {
+      continue;
+    }
+    try {
+      const parsed = JSON.parse(trimmed) as { idempotencyKey?: unknown };
+      if (parsed.idempotencyKey === idempotencyKey) {
+        return true;
+      }
+    } catch {
+      // Legacy diagnostic logs may contain malformed or non-JSON lines. They
+      // should not disable replay protection for later well-formed entries.
+    }
+  }
+  return false;
+}
+
 async function safeAppendFile(
   filePath: string,
   line: string,
   options: QueuedFileWriterOptions,
+  writeOptions: QueuedFileWriteOptions = {},
 ): Promise<void> {
   await assertNoSymlinkParents(filePath);
 
@@ -104,6 +133,12 @@ async function safeAppendFile(
     if (options.maxFileBytes !== undefined && stat.size + lineBytes > options.maxFileBytes) {
       return;
     }
+    if (writeOptions.idempotencyKey) {
+      const content = await handle.readFile("utf8");
+      if (hasJsonlIdempotencyKey(content, writeOptions.idempotencyKey)) {
+        return;
+      }
+    }
     await handle.chmod(0o600);
     await handle.appendFile(line, "utf8");
   } finally {
@@ -127,10 +162,10 @@ export function getQueuedFileWriter(
 
   const writer: QueuedFileWriter = {
     filePath,
-    write: (line: string) => {
+    write: (line: string, writeOptions: QueuedFileWriteOptions = {}) => {
       queue = queue
         .then(() => ready)
-        .then(() => safeAppendFile(filePath, line, options))
+        .then(() => safeAppendFile(filePath, line, options, writeOptions))
         .catch(() => undefined);
     },
     flush: async () => {
