@@ -34,10 +34,12 @@ const jsonValueSchema: z.ZodType<JsonValue> = z.lazy(() =>
 );
 
 const nullableStringSchema = z.string().trim().min(1).nullable().optional();
+const idempotencyKeySchema = z.string().trim().min(1).max(512).optional();
 
 const createFlowRequestSchema = z
   .object({
     action: z.literal("create_flow"),
+    idempotencyKey: idempotencyKeySchema,
     controllerId: z.string().trim().min(1).optional(),
     goal: z.string().trim().min(1),
     status: z.enum(["queued", "running", "waiting", "blocked"]).optional(),
@@ -125,6 +127,7 @@ const runTaskRequestSchema = z
     flowId: z.string().trim().min(1),
     runtime: z.enum(["subagent", "acp"]),
     sourceId: z.string().trim().min(1).optional(),
+    idempotencyKey: idempotencyKeySchema,
     childSessionKey: z.string().trim().min(1).optional(),
     parentTaskId: z.string().trim().min(1).optional(),
     agentId: z.string().trim().min(1).optional(),
@@ -140,6 +143,12 @@ const runTaskRequestSchema = z
   })
   .strict()
   .superRefine((value, ctx) => {
+    if (!value.runId && !value.idempotencyKey) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "run_task requires runId or idempotencyKey for replay-safe retries",
+      });
+    }
     if (
       value.status !== "running" &&
       (value.startedAt !== undefined ||
@@ -200,6 +209,13 @@ type FlowView = {
   updatedAt: number;
   endedAt?: number;
 };
+
+type TaskFlowWebhookIdempotencyLedgerEntry = {
+  fingerprint: string;
+  result: unknown;
+};
+
+type TaskFlowWebhookIdempotencyLedger = Map<string, TaskFlowWebhookIdempotencyLedgerEntry>;
 
 type TaskView = {
   taskId: string;
@@ -307,6 +323,27 @@ function writeJson(res: ServerResponse, statusCode: number, body: unknown): void
   res.statusCode = statusCode;
   res.setHeader("Content-Type", "application/json; charset=utf-8");
   res.end(JSON.stringify(body));
+}
+
+function stableJsonStringify(value: unknown): string {
+  if (Array.isArray(value)) {
+    return `[${value.map((item) => stableJsonStringify(item)).join(",")}]`;
+  }
+  if (value && typeof value === "object") {
+    return `{${Object.entries(value)
+      .toSorted(([left], [right]) => left.localeCompare(right))
+      .map(([key, item]) => `${JSON.stringify(key)}:${stableJsonStringify(item)}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value) ?? "undefined";
+}
+
+function createIdempotencyLedgerKey(params: {
+  routeId: string;
+  action: "create_flow" | "run_task";
+  idempotencyKey: string;
+}): string {
+  return `${params.routeId}:${params.action}:${params.idempotencyKey}`;
 }
 
 function extractSharedSecret(req: IncomingMessage): string {
@@ -498,7 +535,21 @@ function describeWebhookOutcome(params: { action: WebhookAction; result: unknown
   code?: string;
   error?: string;
 } {
+  const idempotencyResult = params.result as {
+    idempotencyConflict?: boolean;
+    reason?: string;
+  };
+  if (idempotencyResult.idempotencyConflict) {
+    return {
+      statusCode: 409,
+      code: "idempotency_conflict",
+      error:
+        idempotencyResult.reason ?? "Idempotency key was already used for a different request.",
+    };
+  }
   switch (params.action.action) {
+    case "create_flow":
+      return { statusCode: 200 };
     case "set_waiting":
     case "resume_flow":
     case "finish_flow":
@@ -535,10 +586,30 @@ async function executeWebhookAction(params: {
   action: WebhookAction;
   target: TaskFlowWebhookTarget;
   cfg: OpenClawConfig;
+  idempotencyLedger: TaskFlowWebhookIdempotencyLedger;
 }): Promise<unknown> {
   const { action, target } = params;
   switch (action.action) {
     case "create_flow": {
+      const idempotencyKey = action.idempotencyKey;
+      const ledgerKey = idempotencyKey
+        ? createIdempotencyLedgerKey({
+            routeId: target.routeId,
+            action: "create_flow",
+            idempotencyKey,
+          })
+        : undefined;
+      const fingerprint = idempotencyKey ? stableJsonStringify(action) : undefined;
+      const ledgerEntry = ledgerKey ? params.idempotencyLedger.get(ledgerKey) : undefined;
+      if (ledgerEntry) {
+        if (ledgerEntry.fingerprint !== fingerprint) {
+          return {
+            idempotencyConflict: true,
+            reason: "Idempotency key was already used for a different create_flow request.",
+          };
+        }
+        return ledgerEntry.result;
+      }
       const flow = target.taskFlow.createManaged({
         controllerId: action.controllerId ?? target.defaultControllerId,
         goal: action.goal,
@@ -548,7 +619,11 @@ async function executeWebhookAction(params: {
         stateJson: action.stateJson,
         waitJson: action.waitJson,
       });
-      return { flow: toFlowView(flow) };
+      const result = { flow: toFlowView(flow) };
+      if (ledgerKey && fingerprint) {
+        params.idempotencyLedger.set(ledgerKey, { fingerprint, result });
+      }
+      return result;
     }
     case "get_flow": {
       const flow = target.taskFlow.get(action.flowId);
@@ -627,6 +702,29 @@ async function executeWebhookAction(params: {
       };
     }
     case "run_task": {
+      const idempotencyKey = action.idempotencyKey ?? action.runId;
+      if (!idempotencyKey) {
+        return {
+          idempotencyConflict: true,
+          reason: "run_task requires runId or idempotencyKey for replay-safe retries",
+        };
+      }
+      const ledgerKey = createIdempotencyLedgerKey({
+        routeId: target.routeId,
+        action: "run_task",
+        idempotencyKey,
+      });
+      const fingerprint = stableJsonStringify(action);
+      const ledgerEntry = params.idempotencyLedger.get(ledgerKey);
+      if (ledgerEntry) {
+        if (ledgerEntry.fingerprint !== fingerprint) {
+          return {
+            idempotencyConflict: true,
+            reason: "Idempotency key was already used for a different run_task request.",
+          };
+        }
+        return ledgerEntry.result;
+      }
       const result = target.taskFlow.runTask({
         flowId: action.flowId,
         runtime: action.runtime,
@@ -634,7 +732,7 @@ async function executeWebhookAction(params: {
         childSessionKey: action.childSessionKey,
         parentTaskId: action.parentTaskId,
         agentId: action.agentId,
-        runId: action.runId,
+        runId: action.runId ?? action.idempotencyKey,
         label: action.label,
         task: action.task,
         preferMetadata: action.preferMetadata,
@@ -645,18 +743,22 @@ async function executeWebhookAction(params: {
         progressSummary: action.progressSummary,
       });
       if (result.created) {
-        return {
+        const response = {
           created: true,
           flow: toFlowView(result.flow),
           task: toTaskView(result.task),
         };
+        params.idempotencyLedger.set(ledgerKey, { fingerprint, result: response });
+        return response;
       }
-      return {
+      const response = {
         found: result.found,
         created: false,
         reason: result.reason,
         ...(result.flow ? { flow: toFlowView(result.flow) } : {}),
       };
+      params.idempotencyLedger.set(ledgerKey, { fingerprint, result: response });
+      return response;
     }
   }
   throw new Error("Unsupported webhook action");
@@ -667,6 +769,7 @@ export function createTaskFlowWebhookRequestHandler(params: {
   targetsByPath: Map<string, TaskFlowWebhookTarget[]>;
   inFlightLimiter?: WebhookInFlightLimiter;
 }): (req: IncomingMessage, res: ServerResponse) => Promise<boolean> {
+  const idempotencyLedger: TaskFlowWebhookIdempotencyLedger = new Map();
   const rateLimiter = createFixedWindowRateLimiter({
     windowMs: WEBHOOK_RATE_LIMIT_DEFAULTS.windowMs,
     maxRequests: WEBHOOK_RATE_LIMIT_DEFAULTS.maxRequests,
@@ -756,6 +859,7 @@ export function createTaskFlowWebhookRequestHandler(params: {
           action: parsed.data,
           target,
           cfg: params.cfg,
+          idempotencyLedger,
         });
         const outcome = describeWebhookOutcome({
           action: parsed.data,

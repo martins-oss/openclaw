@@ -234,6 +234,7 @@ describe("createTaskFlowWebhookRequestHandler", () => {
         action: "run_task",
         flowId: flow.flowId,
         runtime: "acp",
+        idempotencyKey: "run-child-once",
         childSessionKey: "agent:main:subagent:child",
         task: "Inspect the next message batch",
         status: "running",
@@ -250,9 +251,178 @@ describe("createTaskFlowWebhookRequestHandler", () => {
       parentFlowId: flow.flowId,
       childSessionKey: "agent:main:subagent:child",
       runtime: "acp",
+      runId: "run-child-once",
     });
     expect(parsed.result.task.ownerKey).toBeUndefined();
     expect(parsed.result.task.requesterSessionKey).toBeUndefined();
+  });
+
+  it("reuses the same flow when create_flow is retried with the same idempotencyKey", async () => {
+    const { handler, target, secret } = createHandler();
+    const body = {
+      action: "create_flow",
+      idempotencyKey: "create-flow-retry",
+      goal: "Review inbound queue",
+    };
+
+    const first = await dispatchJsonRequest({
+      handler,
+      path: target.path,
+      secret,
+      body,
+    });
+    const second = await dispatchJsonRequest({
+      handler,
+      path: target.path,
+      secret,
+      body,
+    });
+
+    expect(first.statusCode).toBe(200);
+    expect(second.statusCode).toBe(200);
+    const firstParsed = parseJsonBody(first);
+    const secondParsed = parseJsonBody(second);
+    expect(firstParsed.result.flow.flowId).toBe(secondParsed.result.flow.flowId);
+    expect(target.taskFlow.list()).toHaveLength(1);
+  });
+
+  it("rejects create_flow idempotencyKey reuse with a different request body", async () => {
+    const { handler, target, secret } = createHandler();
+    const first = await dispatchJsonRequest({
+      handler,
+      path: target.path,
+      secret,
+      body: {
+        action: "create_flow",
+        idempotencyKey: "create-flow-conflict",
+        goal: "Review inbound queue",
+      },
+    });
+    const second = await dispatchJsonRequest({
+      handler,
+      path: target.path,
+      secret,
+      body: {
+        action: "create_flow",
+        idempotencyKey: "create-flow-conflict",
+        goal: "Review outbound queue",
+      },
+    });
+
+    expect(first.statusCode).toBe(200);
+    expect(second.statusCode).toBe(409);
+    expect(parseJsonBody(second)).toMatchObject({
+      ok: false,
+      code: "idempotency_conflict",
+      error: "Idempotency key was already used for a different create_flow request.",
+    });
+    expect(target.taskFlow.list()).toHaveLength(1);
+  });
+
+  it("rejects run_task without an explicit runId or idempotencyKey", async () => {
+    const { handler, target, secret } = createHandler();
+    const flow = target.taskFlow.createManaged({
+      controllerId: "webhooks/zapier",
+      goal: "Triage inbox",
+    });
+
+    const res = await dispatchJsonRequest({
+      handler,
+      path: target.path,
+      secret,
+      body: {
+        action: "run_task",
+        flowId: flow.flowId,
+        runtime: "acp",
+        task: "Inspect the next message batch",
+      },
+    });
+
+    expect(res.statusCode).toBe(400);
+    expect(parseJsonBody(res)).toMatchObject({
+      ok: false,
+      code: "invalid_request",
+      error: "run_task requires runId or idempotencyKey for replay-safe retries",
+    });
+    expect(target.taskFlow.getTaskSummary(flow.flowId)?.total ?? 0).toBe(0);
+  });
+
+  it("reuses the same task record when run_task is retried with the same idempotencyKey", async () => {
+    const { handler, target, secret } = createHandler();
+    const flow = target.taskFlow.createManaged({
+      controllerId: "webhooks/zapier",
+      goal: "Triage inbox",
+    });
+    const body = {
+      action: "run_task",
+      flowId: flow.flowId,
+      runtime: "acp",
+      idempotencyKey: "run-task-retry",
+      childSessionKey: "agent:main:subagent:child",
+      task: "Inspect the next message batch",
+    };
+
+    const first = await dispatchJsonRequest({
+      handler,
+      path: target.path,
+      secret,
+      body,
+    });
+    const second = await dispatchJsonRequest({
+      handler,
+      path: target.path,
+      secret,
+      body,
+    });
+
+    expect(first.statusCode).toBe(200);
+    expect(second.statusCode).toBe(200);
+    const firstParsed = parseJsonBody(first);
+    const secondParsed = parseJsonBody(second);
+    expect(firstParsed.result.task.taskId).toBe(secondParsed.result.task.taskId);
+    expect(firstParsed.result.task.runId).toBe("run-task-retry");
+    expect(target.taskFlow.getTaskSummary(flow.flowId)?.total).toBe(1);
+  });
+
+  it("rejects run_task idempotencyKey reuse with a different request body", async () => {
+    const { handler, target, secret } = createHandler();
+    const flow = target.taskFlow.createManaged({
+      controllerId: "webhooks/zapier",
+      goal: "Triage inbox",
+    });
+    const first = await dispatchJsonRequest({
+      handler,
+      path: target.path,
+      secret,
+      body: {
+        action: "run_task",
+        flowId: flow.flowId,
+        runtime: "subagent",
+        idempotencyKey: "run-task-conflict",
+        task: "Inspect the next message batch",
+      },
+    });
+    const second = await dispatchJsonRequest({
+      handler,
+      path: target.path,
+      secret,
+      body: {
+        action: "run_task",
+        flowId: flow.flowId,
+        runtime: "subagent",
+        idempotencyKey: "run-task-conflict",
+        task: "Inspect a different batch",
+      },
+    });
+
+    expect(first.statusCode).toBe(200);
+    expect(second.statusCode).toBe(409);
+    expect(parseJsonBody(second)).toMatchObject({
+      ok: false,
+      code: "idempotency_conflict",
+      error: "Idempotency key was already used for a different run_task request.",
+    });
+    expect(target.taskFlow.getTaskSummary(flow.flowId)?.total).toBe(1);
   });
 
   it("returns 404 for missing flow mutations", async () => {
@@ -346,6 +516,7 @@ describe("createTaskFlowWebhookRequestHandler", () => {
         action: "run_task",
         flowId: flow.flowId,
         runtime: "acp",
+        idempotencyKey: "invalid-metadata",
         task: "Inspect queue",
         startedAt: 10,
       },
