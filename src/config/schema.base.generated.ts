@@ -20522,6 +20522,45 @@ export const GENERATED_BASE_CONFIG_SCHEMA: BaseConfigSchemaResponse = {
             description:
               "Provides channel-specific reset overrides keyed by provider/channel id for fine-grained behavior control. Use this only when one channel needs exceptional reset behavior beyond type-level policies.",
           },
+          rollover: {
+            type: "object",
+            properties: {
+              enabled: {
+                type: "boolean",
+                title: "Session Proactive Rollover Enabled",
+                description:
+                  "Enables or disables proactive session rollover. It defaults to active when any positive rollover threshold is configured; set false to keep the thresholds documented but inactive.",
+              },
+              maxTokens: {
+                type: "integer",
+                minimum: 0,
+                maximum: 9007199254740991,
+                title: "Session Rollover Max Tokens",
+                description:
+                  "Rotates the session id when the persisted fresh total-token count exceeds this threshold. Set 0 or omit it to disable token-based proactive rollover.",
+              },
+              maxAgeMinutes: {
+                type: "integer",
+                minimum: 0,
+                maximum: 9007199254740991,
+                title: "Session Rollover Max Age Minutes",
+                description:
+                  "Rotates the session id after this many minutes from the session start timestamp. Set 0 or omit it to disable age-based proactive rollover.",
+              },
+              maxMessages: {
+                type: "integer",
+                minimum: 0,
+                maximum: 9007199254740991,
+                title: "Session Rollover Max Messages",
+                description:
+                  "Rotates the session id when the transcript line/message count exceeds this threshold. Set 0 or omit it to disable message-count proactive rollover.",
+              },
+            },
+            additionalProperties: false,
+            title: "Session Proactive Rollover",
+            description:
+              "Defines proactive session-id rotation thresholds for long-running chats while preserving the stable session key and writing a handoff into the successor transcript. Use this to prevent busy channel/thread sessions from accumulating indefinitely.",
+          },
           store: {
             type: "string",
             title: "Session Store Path",
@@ -27630,6 +27669,31 @@ export const GENERATED_BASE_CONFIG_SCHEMA: BaseConfigSchemaResponse = {
       label: "Session Reset by Channel",
       help: "Provides channel-specific reset overrides keyed by provider/channel id for fine-grained behavior control. Use this only when one channel needs exceptional reset behavior beyond type-level policies.",
       tags: ["storage"],
+    },
+    "session.rollover": {
+      label: "Session Proactive Rollover",
+      help: "Defines proactive session-id rotation thresholds for long-running chats while preserving the stable session key and writing a handoff into the successor transcript. Use this to prevent busy channel/thread sessions from accumulating indefinitely.",
+      tags: ["storage"],
+    },
+    "session.rollover.enabled": {
+      label: "Session Proactive Rollover Enabled",
+      help: "Enables or disables proactive session rollover. It defaults to active when any positive rollover threshold is configured; set false to keep the thresholds documented but inactive.",
+      tags: ["storage"],
+    },
+    "session.rollover.maxTokens": {
+      label: "Session Rollover Max Tokens",
+      help: "Rotates the session id when the persisted fresh total-token count exceeds this threshold. Set 0 or omit it to disable token-based proactive rollover.",
+      tags: ["security", "auth", "performance", "storage"],
+    },
+    "session.rollover.maxAgeMinutes": {
+      label: "Session Rollover Max Age Minutes",
+      help: "Rotates the session id after this many minutes from the session start timestamp. Set 0 or omit it to disable age-based proactive rollover.",
+      tags: ["performance", "storage"],
+    },
+    "session.rollover.maxMessages": {
+      label: "Session Rollover Max Messages",
+      help: "Rotates the session id when the transcript line/message count exceeds this threshold. Set 0 or omit it to disable message-count proactive rollover.",
+      tags: ["performance", "storage"],
     },
     "session.store": {
       label: "Session Store Path",

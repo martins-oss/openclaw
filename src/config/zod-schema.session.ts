@@ -50,6 +50,15 @@ export const SessionSchema = z
       .strict()
       .optional(),
     resetByChannel: z.record(z.string(), SessionResetConfigSchema).optional(),
+    rollover: z
+      .object({
+        enabled: z.boolean().optional(),
+        maxTokens: z.number().int().nonnegative().optional(),
+        maxAgeMinutes: z.number().int().nonnegative().optional(),
+        maxMessages: z.number().int().nonnegative().optional(),
+      })
+      .strict()
+      .optional(),
     store: z.string().optional(),
     typingIntervalSeconds: z.number().int().positive().optional(),
     typingMode: TypingModeSchema.optional(),

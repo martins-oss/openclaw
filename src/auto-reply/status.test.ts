@@ -103,6 +103,32 @@ describe("buildStatusMessage", () => {
     expect(normalized).toContain("Queue: collect");
   });
 
+  it("shows proactive rollover metadata when present", () => {
+    const text = buildStatusMessage({
+      agent: {
+        model: "anthropic/pi:opus",
+        contextTokens: 32_000,
+      },
+      sessionEntry: {
+        sessionId: "abc",
+        updatedAt: 0,
+        totalTokens: 1000,
+        contextTokens: 32_000,
+        compactionCount: 0,
+        rolloverCount: 2,
+        lastRolloverAt: 5 * 60_000,
+        lastRolloverReason: "token-threshold",
+      },
+      sessionKey: "agent:main:discord:channel:123",
+      sessionScope: "per-sender",
+      now: 10 * 60_000,
+    });
+
+    const normalized = normalizeTestText(text);
+
+    expect(normalized).toContain("Rollover: token-threshold #2 5m ago");
+  });
+
   it("does not render stale totalTokens as current context usage", () => {
     const text = buildStatusMessage({
       agent: {

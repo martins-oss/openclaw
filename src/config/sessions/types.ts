@@ -274,6 +274,12 @@ export type SessionEntry = {
   fallbackNoticeReason?: string;
   contextTokens?: number;
   compactionCount?: number;
+  /** Count of proactive session-id rollovers for this stable sessionKey. */
+  rolloverCount?: number;
+  /** Timestamp (ms) of the latest proactive session-id rollover. */
+  lastRolloverAt?: number;
+  /** Reason for the latest proactive session-id rollover. */
+  lastRolloverReason?: "token-threshold" | "age-threshold" | "message-threshold";
   compactionCheckpoints?: SessionCompactionCheckpoint[];
   memoryFlushAt?: number;
   memoryFlushCompactionCount?: number;

@@ -1413,6 +1413,16 @@ export const FIELD_HELP: Record<string, string> = {
     "Defines reset policy for thread-scoped sessions, including focused channel thread workflows. Use this when thread sessions should expire faster or slower than other chat types.",
   "session.resetByChannel":
     "Provides channel-specific reset overrides keyed by provider/channel id for fine-grained behavior control. Use this only when one channel needs exceptional reset behavior beyond type-level policies.",
+  "session.rollover":
+    "Defines proactive session-id rotation thresholds for long-running chats while preserving the stable session key and writing a handoff into the successor transcript. Use this to prevent busy channel/thread sessions from accumulating indefinitely.",
+  "session.rollover.enabled":
+    "Enables or disables proactive session rollover. It defaults to active when any positive rollover threshold is configured; set false to keep the thresholds documented but inactive.",
+  "session.rollover.maxTokens":
+    "Rotates the session id when the persisted fresh total-token count exceeds this threshold. Set 0 or omit it to disable token-based proactive rollover.",
+  "session.rollover.maxAgeMinutes":
+    "Rotates the session id after this many minutes from the session start timestamp. Set 0 or omit it to disable age-based proactive rollover.",
+  "session.rollover.maxMessages":
+    "Rotates the session id when the transcript line/message count exceeds this threshold. Set 0 or omit it to disable message-count proactive rollover.",
   "session.store":
     "Sets the session storage file path used to persist session records across restarts. Use an explicit path only when you need custom disk layout, backup routing, or mounted-volume storage.",
   "session.typingIntervalSeconds":

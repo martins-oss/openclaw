@@ -489,6 +489,7 @@ export type PluginHookSessionEndReason =
   | "reset"
   | "idle"
   | "daily"
+  | "rollover"
   | "compaction"
   | "deleted"
   | "unknown";

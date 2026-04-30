@@ -2594,6 +2594,340 @@ describe("initSessionState preserves behavior overrides across /new and /reset",
     }
   });
 
+  it("rolls over fresh group sessions when total token threshold is reached", async () => {
+    const storePath = await createStorePath("openclaw-token-rollover-at-threshold-");
+    const sessionKey = "agent:main:discord:channel:rollover-at-threshold-channel";
+    const existingSessionId = "token-at-threshold-session";
+
+    await seedSessionStoreWithOverrides({
+      storePath,
+      sessionKey,
+      sessionId: existingSessionId,
+      overrides: {
+        chatType: "group",
+        lastChannel: "discord",
+        totalTokens: 100_000,
+        totalTokensFresh: true,
+      },
+    });
+
+    const result = await initSessionState({
+      ctx: {
+        Body: "next task",
+        RawBody: "next task",
+        CommandBody: "next task",
+        From: "discord-user",
+        To: "bot",
+        ChatType: "group",
+        SessionKey: sessionKey,
+        Provider: "discord",
+        Surface: "discord",
+        OriginatingChannel: "discord",
+        OriginatingTo: "channel:rollover-at-threshold-channel",
+      },
+      cfg: {
+        session: {
+          store: storePath,
+          rollover: { maxTokens: 100_000 },
+          reset: { mode: "idle", idleMinutes: 999 },
+        },
+      } as OpenClawConfig,
+      commandAuthorized: true,
+    });
+
+    expect(result.isNewSession).toBe(true);
+    expect(result.sessionId).not.toBe(existingSessionId);
+    expect(result.sessionEntry.lastRolloverReason).toBe("token-threshold");
+  });
+
+  it("rolls over fresh group sessions when total token threshold is exceeded", async () => {
+    const storePath = await createStorePath("openclaw-token-rollover-");
+    const sessionKey = "agent:main:discord:channel:rollover-channel";
+    const existingSessionId = "token-heavy-session";
+    const transcriptPath = path.join(path.dirname(storePath), `${existingSessionId}.jsonl`);
+
+    await seedSessionStoreWithOverrides({
+      storePath,
+      sessionKey,
+      sessionId: existingSessionId,
+      overrides: {
+        chatType: "group",
+        lastChannel: "discord",
+        lastTo: "channel:rollover-channel",
+        deliveryContext: { channel: "discord", to: "channel:rollover-channel" },
+        totalTokens: 75_000,
+        totalTokensFresh: true,
+        compactionCount: 3,
+        memoryFlushAt: Date.now() - 1000,
+        memoryFlushCompactionCount: 3,
+        verboseLevel: "on",
+        thinkingLevel: "high",
+      },
+    });
+    await fs.writeFile(transcriptPath, '{"type":"message"}\n', "utf8");
+
+    const cfg = {
+      session: {
+        store: storePath,
+        rollover: { maxTokens: 60_000 },
+        reset: { mode: "idle", idleMinutes: 999 },
+      },
+    } as OpenClawConfig;
+
+    const result = await initSessionState({
+      ctx: {
+        Body: "next task",
+        RawBody: "next task",
+        CommandBody: "next task",
+        From: "discord-user",
+        To: "bot",
+        ChatType: "group",
+        SessionKey: sessionKey,
+        Provider: "discord",
+        Surface: "discord",
+        OriginatingChannel: "discord",
+        OriginatingTo: "channel:rollover-channel",
+      },
+      cfg,
+      commandAuthorized: true,
+    });
+
+    expect(result.isNewSession).toBe(true);
+    expect(result.resetTriggered).toBe(false);
+    expect(result.sessionKey).toBe(sessionKey);
+    expect(result.sessionId).not.toBe(existingSessionId);
+    expect(result.previousSessionEntry?.sessionId).toBe(existingSessionId);
+    expect(result.sessionEntry.lastChannel).toBe("discord");
+    expect(result.sessionEntry.lastTo).toBe("channel:rollover-channel");
+    expect(result.sessionEntry.deliveryContext).toEqual({
+      channel: "discord",
+      to: "channel:rollover-channel",
+    });
+    expect(result.sessionEntry.verboseLevel).toBe("on");
+    expect(result.sessionEntry.thinkingLevel).toBe("high");
+    expect(result.sessionEntry.totalTokens).toBeUndefined();
+    expect(result.sessionEntry.compactionCount).toBe(0);
+    expect(result.sessionEntry.memoryFlushAt).toBeUndefined();
+    expect(result.sessionEntry.rolloverCount).toBe(1);
+    expect(result.sessionEntry.lastRolloverReason).toBe("token-threshold");
+    expect(await fs.stat(transcriptPath).catch(() => null)).toBeNull();
+  });
+
+  it("writes a durable handoff message into the successor transcript on proactive rollover", async () => {
+    const storePath = await createStorePath("openclaw-rollover-handoff-");
+    const sessionKey = "agent:main:discord:channel:rollover-handoff-channel";
+    const existingSessionId = "handoff-source-session";
+    const transcriptPath = path.join(path.dirname(storePath), `${existingSessionId}.jsonl`);
+
+    await seedSessionStoreWithOverrides({
+      storePath,
+      sessionKey,
+      sessionId: existingSessionId,
+      overrides: {
+        chatType: "group",
+        totalTokens: 75_000,
+        totalTokensFresh: true,
+      },
+    });
+    await fs.writeFile(
+      transcriptPath,
+      [
+        JSON.stringify({ type: "session", version: 3, id: existingSessionId }),
+        JSON.stringify({
+          type: "message",
+          message: { role: "user", content: "Approval: proceed with the internal patch." },
+        }),
+        JSON.stringify({
+          type: "message",
+          message: {
+            role: "assistant",
+            content: [{ type: "text", text: "Decision captured; next step is verification." }],
+          },
+        }),
+      ].join("\n") + "\n",
+      "utf8",
+    );
+
+    const result = await initSessionState({
+      ctx: {
+        Body: "next task",
+        RawBody: "next task",
+        CommandBody: "next task",
+        From: "discord-user",
+        To: "bot",
+        ChatType: "group",
+        SessionKey: sessionKey,
+        Provider: "discord",
+        Surface: "discord",
+        OriginatingChannel: "discord",
+        OriginatingTo: "channel:rollover-handoff-channel",
+      },
+      cfg: {
+        session: {
+          store: storePath,
+          rollover: { maxTokens: 60_000 },
+          reset: { mode: "idle", idleMinutes: 999 },
+        },
+      } as OpenClawConfig,
+      commandAuthorized: true,
+    });
+
+    const successorTranscript = await fs.readFile(result.sessionEntry.sessionFile!, "utf8");
+    expect(successorTranscript).toContain(
+      "System handoff: the previous chat session was automatically rolled over",
+    );
+    expect(successorTranscript).toContain("Reason: token threshold.");
+    expect(successorTranscript).toContain("Previous session id: handoff-source-session.");
+    expect(successorTranscript).toContain("Approval: proceed with the internal patch.");
+    expect(successorTranscript).toContain("Decision captured; next step is verification.");
+  });
+
+  it("rolls over fresh group sessions when transcript message threshold is exceeded", async () => {
+    const storePath = await createStorePath("openclaw-message-rollover-");
+    const sessionKey = "agent:main:discord:channel:message-rollover-channel";
+    const existingSessionId = "message-heavy-session";
+    const transcriptPath = path.join(path.dirname(storePath), `${existingSessionId}.jsonl`);
+
+    await seedSessionStoreWithOverrides({
+      storePath,
+      sessionKey,
+      sessionId: existingSessionId,
+      overrides: {
+        chatType: "group",
+        totalTokens: 1000,
+        totalTokensFresh: true,
+      },
+    });
+    await fs.writeFile(
+      transcriptPath,
+      Array.from({ length: 6 }, () => '{"type":"message"}').join("\n") + "\n",
+      "utf8",
+    );
+
+    const result = await initSessionState({
+      ctx: {
+        Body: "next task",
+        RawBody: "next task",
+        CommandBody: "next task",
+        From: "discord-user",
+        To: "bot",
+        ChatType: "group",
+        SessionKey: sessionKey,
+        Provider: "discord",
+        Surface: "discord",
+        OriginatingChannel: "discord",
+        OriginatingTo: "channel:message-rollover-channel",
+      },
+      cfg: {
+        session: {
+          store: storePath,
+          rollover: { maxMessages: 5 },
+          reset: { mode: "idle", idleMinutes: 999 },
+        },
+      } as OpenClawConfig,
+      commandAuthorized: true,
+    });
+
+    expect(result.isNewSession).toBe(true);
+    expect(result.sessionId).not.toBe(existingSessionId);
+    expect(result.sessionEntry.rolloverCount).toBe(1);
+    expect(result.sessionEntry.lastRolloverReason).toBe("message-threshold");
+  });
+
+  it("rolls over fresh group sessions when age threshold is exceeded", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date("2026-04-29T12:00:00Z"));
+      const storePath = await createStorePath("openclaw-age-rollover-");
+      const sessionKey = "agent:main:discord:channel:age-rollover-channel";
+      const existingSessionId = "age-heavy-session";
+      const startedAt = Date.now() - 7 * 24 * 60 * 60_000;
+
+      await seedSessionStoreWithOverrides({
+        storePath,
+        sessionKey,
+        sessionId: existingSessionId,
+        overrides: {
+          chatType: "group",
+          sessionStartedAt: startedAt,
+          updatedAt: Date.now(),
+          totalTokens: 1000,
+          totalTokensFresh: true,
+        },
+      });
+
+      const result = await initSessionState({
+        ctx: {
+          Body: "next task",
+          RawBody: "next task",
+          CommandBody: "next task",
+          From: "discord-user",
+          To: "bot",
+          ChatType: "group",
+          SessionKey: sessionKey,
+          Provider: "discord",
+          Surface: "discord",
+          OriginatingChannel: "discord",
+          OriginatingTo: "channel:age-rollover-channel",
+        },
+        cfg: {
+          session: {
+            store: storePath,
+            rollover: { maxAgeMinutes: 60 },
+            reset: { mode: "idle", idleMinutes: 99999 },
+          },
+        } as OpenClawConfig,
+        commandAuthorized: true,
+      });
+
+      expect(result.isNewSession).toBe(true);
+      expect(result.sessionId).not.toBe(existingSessionId);
+      expect(result.sessionEntry.rolloverCount).toBe(1);
+      expect(result.sessionEntry.lastRolloverReason).toBe("age-threshold");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not roll over system events even when token threshold is exceeded", async () => {
+    const storePath = await createStorePath("openclaw-token-rollover-system-");
+    const sessionKey = "agent:main:discord:channel:system-rollover-channel";
+    const existingSessionId = "system-token-heavy-session";
+
+    await seedSessionStoreWithOverrides({
+      storePath,
+      sessionKey,
+      sessionId: existingSessionId,
+      overrides: {
+        chatType: "group",
+        totalTokens: 75_000,
+        totalTokensFresh: true,
+      },
+    });
+
+    const cfg = {
+      session: { store: storePath, rollover: { maxTokens: 60_000 } },
+    } as OpenClawConfig;
+
+    const result = await initSessionState({
+      ctx: {
+        Body: "heartbeat",
+        RawBody: "heartbeat",
+        CommandBody: "heartbeat",
+        ChatType: "group",
+        SessionKey: sessionKey,
+        Provider: "heartbeat",
+        Surface: "heartbeat",
+      },
+      cfg,
+      commandAuthorized: true,
+    });
+
+    expect(result.isNewSession).toBe(false);
+    expect(result.sessionId).toBe(existingSessionId);
+    expect(result.sessionEntry.rolloverCount).toBeUndefined();
+  });
+
   it("keeps provider-owned CLI sessions on implicit daily reset boundaries", async () => {
     vi.useFakeTimers();
     try {
