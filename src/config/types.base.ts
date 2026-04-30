@@ -137,6 +137,17 @@ export type SessionResetByTypeConfig = {
   thread?: SessionResetConfig;
 };
 
+export type SessionRolloverConfig = {
+  /** Enable proactive session-id rollover before large/old channel transcripts choke future turns. Default: true when any threshold is set. */
+  enabled?: boolean;
+  /** Fresh total-token threshold for rotating the sessionId while preserving the sessionKey. Set 0 to disable. */
+  maxTokens?: number;
+  /** Age threshold, in minutes from sessionStartedAt, for rotating the sessionId while preserving the sessionKey. Set 0 to disable. */
+  maxAgeMinutes?: number;
+  /** Transcript line/message threshold for rotating the sessionId while preserving the sessionKey. Set 0 to disable. */
+  maxMessages?: number;
+};
+
 export type SessionThreadBindingsConfig = {
   /**
    * Master switch for thread-bound session routing features.
@@ -167,6 +178,8 @@ export type SessionConfig = {
   resetByType?: SessionResetByTypeConfig;
   /** Channel-specific reset overrides (e.g. { discord: { mode: "idle", idleMinutes: 10080 } }). */
   resetByChannel?: Record<string, SessionResetConfig>;
+  /** Proactive session-id rollover thresholds for long-running chats. */
+  rollover?: SessionRolloverConfig;
   store?: string;
   typingIntervalSeconds?: number;
   typingMode?: TypingMode;

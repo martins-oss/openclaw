@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import fs from "node:fs";
 import path from "node:path";
 import { resolveSessionAgentId } from "../../agents/agent-scope.js";
 import { clearBootstrapSnapshotOnSessionRollover } from "../../agents/bootstrap-cache.js";
@@ -10,7 +11,11 @@ import { resolveGroupSessionKey } from "../../config/sessions/group.js";
 import { resolveSessionLifecycleTimestamps } from "../../config/sessions/lifecycle.js";
 import { canonicalizeMainSessionAlias } from "../../config/sessions/main-session.js";
 import { deriveSessionMetaPatch } from "../../config/sessions/metadata.js";
-import { resolveSessionTranscriptPath, resolveStorePath } from "../../config/sessions/paths.js";
+import {
+  resolveSessionFilePath,
+  resolveSessionTranscriptPath,
+  resolveStorePath,
+} from "../../config/sessions/paths.js";
 import { resolveResetPreservedSelection } from "../../config/sessions/reset-preserved-selection.js";
 import {
   evaluateSessionFreshness,
@@ -67,6 +72,7 @@ import {
 } from "./session-fork.js";
 import { buildSessionEndHookPayload, buildSessionStartHookPayload } from "./session-hooks.js";
 import { clearSessionResetRuntimeState } from "./session-reset-cleanup.js";
+import { appendSessionRolloverHandoff } from "./session-rollover-handoff.js";
 
 const log = createSubsystemLogger("session-init");
 let sessionArchiveRuntimePromise: Promise<
@@ -149,6 +155,115 @@ function resolveStaleSessionEndReason(params: {
 function hasProviderOwnedSession(entry: SessionEntry | undefined): boolean {
   const provider = normalizeOptionalString(entry?.providerOverride ?? entry?.modelProvider);
   return Boolean(provider && getCliSessionBinding(entry, provider));
+}
+
+function resolvePositiveInteger(value: unknown): number | undefined {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return undefined;
+  }
+  const normalized = Math.floor(value);
+  return normalized > 0 ? normalized : undefined;
+}
+
+function countTranscriptLinesUntil(params: {
+  entry?: SessionEntry;
+  storePath: string;
+  agentId: string;
+  limit: number;
+}): number | undefined {
+  const sessionId = params.entry?.sessionId;
+  if (!sessionId || params.limit <= 0) {
+    return undefined;
+  }
+  let transcriptPath: string;
+  try {
+    transcriptPath = resolveSessionFilePath(sessionId, params.entry, {
+      agentId: params.agentId,
+      sessionsDir: path.dirname(params.storePath),
+    });
+  } catch {
+    return undefined;
+  }
+  if (!fs.existsSync(transcriptPath)) {
+    return undefined;
+  }
+  try {
+    const fd = fs.openSync(transcriptPath, "r");
+    try {
+      const buffer = Buffer.allocUnsafe(64 * 1024);
+      let count = 0;
+      let bytesRead = 0;
+      do {
+        bytesRead = fs.readSync(fd, buffer, 0, buffer.length, null);
+        for (let index = 0; index < bytesRead; index += 1) {
+          if (buffer[index] === 10) {
+            count += 1;
+            if (count > params.limit) {
+              return count;
+            }
+          }
+        }
+      } while (bytesRead > 0);
+      return count;
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch {
+    return undefined;
+  }
+}
+
+function shouldProactivelyRolloverSession(params: {
+  entry?: SessionEntry;
+  isSystemEvent: boolean;
+  hasProviderOwnedSession: boolean;
+  cfg: OpenClawConfig;
+  now: number;
+  storePath: string;
+  agentId: string;
+}): SessionEntry["lastRolloverReason"] | undefined {
+  if (params.isSystemEvent || params.hasProviderOwnedSession) {
+    return undefined;
+  }
+  const policy = params.cfg.session?.rollover;
+  if (policy?.enabled === false) {
+    return undefined;
+  }
+  const maxTokens = resolvePositiveInteger(policy?.maxTokens);
+  if (maxTokens) {
+    const totalTokens = params.entry?.totalTokens;
+    if (
+      params.entry?.totalTokensFresh !== false &&
+      typeof totalTokens === "number" &&
+      Number.isFinite(totalTokens) &&
+      totalTokens > maxTokens
+    ) {
+      return "token-threshold";
+    }
+  }
+  const maxMessages = resolvePositiveInteger(policy?.maxMessages);
+  if (maxMessages) {
+    const transcriptLineCount = countTranscriptLinesUntil({
+      entry: params.entry,
+      storePath: params.storePath,
+      agentId: params.agentId,
+      limit: maxMessages,
+    });
+    if (typeof transcriptLineCount === "number" && transcriptLineCount > maxMessages) {
+      return "message-threshold";
+    }
+  }
+  const maxAgeMinutes = resolvePositiveInteger(policy?.maxAgeMinutes);
+  const startedAt = params.entry?.sessionStartedAt;
+  if (
+    maxAgeMinutes &&
+    typeof startedAt === "number" &&
+    Number.isFinite(startedAt) &&
+    params.now - startedAt > maxAgeMinutes * 60_000
+  ) {
+    return "age-threshold";
+  }
+  return undefined;
 }
 
 export type SessionInitResult = {
@@ -435,7 +550,8 @@ export async function initSessionState(params: {
     Boolean(entry?.sessionId) &&
     typeof entry?.updatedAt === "number" &&
     Number.isFinite(entry.updatedAt);
-  const skipImplicitExpiry = hasProviderOwnedSession(entry) && resetPolicy.configured !== true;
+  const entryHasProviderOwnedSession = hasProviderOwnedSession(entry);
+  const skipImplicitExpiry = entryHasProviderOwnedSession && resetPolicy.configured !== true;
   const lifecycleTimestamps = resolveSessionLifecycleTimestamps({
     entry,
     agentId,
@@ -467,22 +583,45 @@ export async function initSessionState(params: {
         skipConfiguredFallbackWhenActiveSessionNonAcp: false,
       }) ?? "",
     );
-  const freshEntry =
+  const freshByPolicy =
     (isSystemEvent && canReuseExistingEntry) ||
     (entryFreshness?.fresh ?? false) ||
     (softResetAllowed && canReuseExistingEntry);
+  const proactiveRolloverReason =
+    freshByPolicy && canReuseExistingEntry
+      ? shouldProactivelyRolloverSession({
+          entry,
+          isSystemEvent,
+          hasProviderOwnedSession: entryHasProviderOwnedSession,
+          cfg,
+          now,
+          storePath,
+          agentId,
+        })
+      : undefined;
+  const proactiveRolloverTriggered = Boolean(proactiveRolloverReason);
+  if (proactiveRolloverTriggered) {
+    log.warn(
+      `proactive session rollover: sessionKey=${sessionKey} sessionId=${entry?.sessionId ?? "unknown"} ` +
+        `reason=${proactiveRolloverReason ?? "unknown"} totalTokens=${entry?.totalTokens ?? "unknown"} ` +
+        `maxTokens=${sessionCfg?.rollover?.maxTokens ?? "unknown"}`,
+    );
+  }
+  const freshEntry = freshByPolicy && !proactiveRolloverTriggered;
   // Capture the current session entry before any reset so its transcript can be
   // archived afterward.  We need to do this for both explicit resets (/new, /reset)
   // and for scheduled/daily resets where the session has become stale (!freshEntry).
   // Without this, daily-reset transcripts are left as orphaned files on disk (#35481).
   const previousSessionEntry = (resetTriggered || !freshEntry) && entry ? { ...entry } : undefined;
-  const previousSessionEndReason = resetTriggered
-    ? resolveExplicitSessionEndReason(matchedResetTriggerLower)
-    : resolveStaleSessionEndReason({
-        entry,
-        freshness: entryFreshness,
-        now,
-      });
+  const previousSessionEndReason = proactiveRolloverTriggered
+    ? "rollover"
+    : resetTriggered
+      ? resolveExplicitSessionEndReason(matchedResetTriggerLower)
+      : resolveStaleSessionEndReason({
+          entry,
+          freshness: entryFreshness,
+          now,
+        });
   clearBootstrapSnapshotOnSessionRollover({
     sessionKey,
     previousSessionId: previousSessionEntry?.sessionId,
@@ -548,7 +687,8 @@ export async function initSessionState(params: {
     }
   }
 
-  const baseEntry = !isNewSession && freshEntry ? entry : undefined;
+  const baseEntry =
+    proactiveRolloverTriggered && entry ? entry : !isNewSession && freshEntry ? entry : undefined;
   // Track the originating channel/to for announce routing (subagent announce-back).
   const originatingChannelRaw = ctx.OriginatingChannel as string | undefined;
   const isInterSession = isInterSessionInputProvenance(ctx.InputProvenance);
@@ -768,6 +908,7 @@ export async function initSessionState(params: {
   });
   sessionEntry = resolvedSessionFile.sessionEntry;
   if (isNewSession) {
+    const previousRolloverCount = entry?.rolloverCount ?? 0;
     sessionEntry.compactionCount = 0;
     sessionEntry.memoryFlushCompactionCount = undefined;
     sessionEntry.memoryFlushAt = undefined;
@@ -781,6 +922,11 @@ export async function initSessionState(params: {
     sessionEntry.outputTokens = undefined;
     sessionEntry.estimatedCostUsd = undefined;
     sessionEntry.contextTokens = undefined;
+    if (proactiveRolloverTriggered) {
+      sessionEntry.rolloverCount = previousRolloverCount + 1;
+      sessionEntry.lastRolloverAt = now;
+      sessionEntry.lastRolloverReason = proactiveRolloverReason;
+    }
   }
   // Preserve per-session overrides while resetting compaction state on /new.
   sessionStore[sessionKey] = { ...sessionStore[sessionKey], ...sessionEntry };
@@ -843,6 +989,28 @@ export async function initSessionState(params: {
       sessionFile: previousSessionEntry.sessionFile,
       reason: previousSessionEndReason ?? "unknown",
     });
+    if (proactiveRolloverTriggered) {
+      try {
+        const appended = await appendSessionRolloverHandoff({
+          nextSessionId: sessionId ?? sessionEntry.sessionId,
+          nextSessionFile: sessionEntry.sessionFile,
+          previousEntry: previousSessionEntry,
+          previousTranscriptPath: previousSessionTranscript.sessionFile,
+          reason: proactiveRolloverReason ?? previousSessionEndReason,
+          now,
+        });
+        if (!appended) {
+          log.warn(
+            `session rollover handoff skipped: sessionKey=${sessionKey} previousSessionId=${previousSessionEntry.sessionId}`,
+          );
+        }
+      } catch (error) {
+        log.warn(
+          `session rollover handoff failed: sessionKey=${sessionKey} previousSessionId=${previousSessionEntry.sessionId}`,
+          { error: String(error) },
+        );
+      }
+    }
     void closeTrackedBrowserTabsForSessions({
       sessionKeys: [previousSessionEntry.sessionId, sessionKey],
       onWarn: (message) => log.warn(message),

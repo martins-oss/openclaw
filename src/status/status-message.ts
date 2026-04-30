@@ -133,6 +133,22 @@ function normalizeAuthMode(value?: string): NormalizedAuthMode | undefined {
   return undefined;
 }
 
+function formatRolloverStatus(entry: SessionEntry | undefined, now: number): string | null {
+  if (!entry?.lastRolloverReason) {
+    return null;
+  }
+  const count =
+    typeof entry.rolloverCount === "number" && Number.isFinite(entry.rolloverCount)
+      ? Math.max(0, Math.floor(entry.rolloverCount))
+      : 0;
+  const age =
+    typeof entry.lastRolloverAt === "number" && Number.isFinite(entry.lastRolloverAt)
+      ? ` ${formatTimeAgo(Math.max(0, now - entry.lastRolloverAt))}`
+      : "";
+  const countLabel = count > 0 ? ` #${count}` : "";
+  return `↻ Rollover: ${entry.lastRolloverReason}${countLabel}${age}`;
+}
+
 function resolveConfiguredTextVerbosity(params: {
   config?: OpenClawConfig;
   agentId?: string;
@@ -760,6 +776,7 @@ export function buildStatusMessage(args: StatusArgs): string {
   const contextLine = [
     `Context: ${formatTokens(totalTokens, contextTokens ?? null)}`,
     `🧹 Compactions: ${entry?.compactionCount ?? 0}`,
+    formatRolloverStatus(entry, now),
   ]
     .filter(Boolean)
     .join(" · ");
