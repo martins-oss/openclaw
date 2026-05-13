@@ -43,6 +43,14 @@ function resolveImageToolMaxTokens(modelMaxTokens: number | undefined, requested
   return Math.min(requestedMaxTokens, modelMaxTokens);
 }
 
+function normalizeImageDescriptionTimeoutMs(timeoutMs: number | undefined): number | undefined {
+  if (typeof timeoutMs !== "number" || !Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+    return undefined;
+  }
+  const normalizedMs = timeoutMs < 1000 ? timeoutMs * 1000 : timeoutMs;
+  return Math.max(1000, Math.min(30_000, normalizedMs));
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
@@ -316,11 +324,33 @@ async function describeImagesWithModelInternal(
   options: { onPayload?: ProviderStreamOptions["onPayload"] } = {},
 ): Promise<ImagesDescriptionResult> {
   const prompt = params.prompt ?? "Describe the image.";
+  const startedAt = Date.now();
+  const timeoutMs = normalizeImageDescriptionTimeoutMs(params.timeoutMs);
   let apiKey: string;
   let model: Model<Api> | undefined;
 
+  const remainingTimeoutMs = () => {
+    if (timeoutMs === undefined) {
+      return undefined;
+    }
+    return Math.max(1, timeoutMs - (Date.now() - startedAt));
+  };
+
+  let runtimeTimeout: ReturnType<typeof setTimeout> | undefined;
   try {
-    const resolved = await resolveImageRuntime(params);
+    const runtime = resolveImageRuntime(params);
+    const resolved =
+      timeoutMs === undefined
+        ? await runtime
+        : await Promise.race([
+            runtime,
+            new Promise<never>((_, reject) => {
+              runtimeTimeout = setTimeout(
+                () => reject(new Error(`image description timed out after ${timeoutMs}ms`)),
+                timeoutMs,
+              );
+            }),
+          ]);
     apiKey = resolved.apiKey;
     model = resolved.model;
   } catch (err) {
@@ -333,9 +363,11 @@ async function describeImagesWithModelInternal(
       modelId: params.model,
       modelBaseUrl: fallback.modelBaseUrl,
       prompt,
-      timeoutMs: params.timeoutMs,
+      timeoutMs: remainingTimeoutMs(),
       images: params.images,
     });
+  } finally {
+    clearTimeout(runtimeTimeout);
   }
 
   if (isMinimaxVlmModel(model.provider, model.id)) {
@@ -344,7 +376,7 @@ async function describeImagesWithModelInternal(
       modelId: model.id,
       modelBaseUrl: model.baseUrl,
       prompt,
-      timeoutMs: params.timeoutMs,
+      timeoutMs: remainingTimeoutMs(),
       images: params.images,
     });
   }
@@ -358,12 +390,11 @@ async function describeImagesWithModelInternal(
   const context = buildImageContext(prompt, params.images, {
     promptInUserContent: shouldPlaceImagePromptInUserContent(model),
   });
+  const requestTimeoutMs = remainingTimeoutMs();
   const controller = new AbortController();
   const timeout =
-    typeof params.timeoutMs === "number" &&
-    Number.isFinite(params.timeoutMs) &&
-    params.timeoutMs > 0
-      ? setTimeout(() => controller.abort(), params.timeoutMs)
+    requestTimeoutMs !== undefined
+      ? setTimeout(() => controller.abort(), requestTimeoutMs)
       : undefined;
 
   const maxTokens = resolveImageToolMaxTokens(model.maxTokens, params.maxTokens ?? 512);
@@ -373,6 +404,7 @@ async function describeImagesWithModelInternal(
       apiKey,
       maxTokens,
       signal: controller.signal,
+      ...(requestTimeoutMs !== undefined ? { timeoutMs: requestTimeoutMs } : {}),
       ...(payloadHandler ? { onPayload: payloadHandler } : {}),
     });
   };

@@ -88,6 +88,7 @@ const { describeImageWithModel } = await import("./image.js");
 
 describe("describeImageWithModel", () => {
   afterEach(() => {
+    vi.useRealTimers();
     vi.unstubAllGlobals();
     vi.restoreAllMocks();
   });
@@ -164,7 +165,10 @@ describe("describeImageWithModel", () => {
         signal: expect.any(AbortSignal),
       }),
     );
-    expect(timeoutSpy).toHaveBeenCalledWith(1000);
+    expect(timeoutSpy).toHaveBeenCalledWith(expect.any(Number));
+    const vlmTimeout = timeoutSpy.mock.calls[0]?.[0];
+    expect(vlmTimeout).toBeGreaterThan(0);
+    expect(vlmTimeout).toBeLessThanOrEqual(1000);
     expect(completeMock).not.toHaveBeenCalled();
   });
 
@@ -519,6 +523,65 @@ describe("describeImageWithModel", () => {
       expect(retryPayload).toEqual(expectedRetryPayload);
     },
   );
+
+  it("normalizes sub-second image timeouts before passing them to generic completions", async () => {
+    discoverModelsMock.mockReturnValue({
+      find: vi.fn(() => ({
+        api: "openai-responses",
+        provider: "openai",
+        id: "gpt-5.4-mini",
+        input: ["text", "image"],
+        baseUrl: "https://api.openai.com/v1",
+      })),
+    });
+    completeMock.mockResolvedValue({
+      role: "assistant",
+      api: "openai-responses",
+      provider: "openai",
+      model: "gpt-5.4-mini",
+      stopReason: "stop",
+      timestamp: Date.now(),
+      content: [{ type: "text", text: "timeout ok" }],
+    });
+
+    await describeImageWithModel({
+      cfg: {},
+      agentDir: "/tmp/openclaw-agent",
+      provider: "openai",
+      model: "gpt-5.4-mini",
+      buffer: Buffer.from("png-bytes"),
+      fileName: "image.png",
+      mime: "image/png",
+      prompt: "Describe the image.",
+      timeoutMs: 1,
+    });
+
+    const [, , options] = completeMock.mock.calls[0] ?? [];
+    expect(options?.timeoutMs).toBeGreaterThan(0);
+    expect(options?.timeoutMs).toBeLessThanOrEqual(1000);
+  });
+
+  it("rejects when image runtime setup exceeds the normalized request timeout", async () => {
+    vi.useFakeTimers();
+    ensureOpenClawModelsJsonMock.mockImplementationOnce(() => new Promise(() => {}));
+
+    const result = describeImageWithModel({
+      cfg: {},
+      agentDir: "/tmp/openclaw-agent",
+      provider: "openai",
+      model: "gpt-5.4-mini",
+      buffer: Buffer.from("png-bytes"),
+      fileName: "image.png",
+      mime: "image/png",
+      prompt: "Describe the image.",
+      timeoutMs: 1,
+    });
+
+    const assertion = expect(result).rejects.toThrow("image description timed out after 1000ms");
+    await vi.advanceTimersByTimeAsync(1000);
+    await assertion;
+    expect(completeMock).not.toHaveBeenCalled();
+  });
 
   it("normalizes deprecated google flash ids before lookup and keeps profile auth selection", async () => {
     const findMock = vi.fn((provider: string, modelId: string) => {
