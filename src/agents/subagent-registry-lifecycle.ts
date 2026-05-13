@@ -12,6 +12,7 @@ import { normalizeDeliveryContext } from "../utils/delivery-context.shared.js";
 import { retireSessionMcpRuntimeForSessionKey } from "./pi-bundle-mcp-tools.js";
 import type { SubagentAnnounceDeliveryResult } from "./subagent-announce-dispatch.js";
 import { type SubagentRunOutcome, withSubagentOutcomeTiming } from "./subagent-announce-output.js";
+import { evaluateSubagentGoal } from "./subagent-goal-state.js";
 import {
   SUBAGENT_ENDED_REASON_COMPLETE,
   type SubagentLifecycleEndedReason,
@@ -214,19 +215,26 @@ export function createSubagentRegistryLifecycleController(params: {
     }
     if (outcome.status === "error") {
       entry.frozenResultText = null;
-      entry.frozenResultCapturedAt = Date.now();
-      return true;
-    }
-    try {
-      const captured = await params.captureSubagentCompletionReply(entry.childSessionKey, {
-        waitForReply: entry.expectsCompletionMessage === true,
-        outcome,
-      });
-      entry.frozenResultText = captured?.trim() ? capFrozenResultText(captured) : null;
-    } catch {
-      entry.frozenResultText = null;
+    } else {
+      try {
+        const captured = await params.captureSubagentCompletionReply(entry.childSessionKey, {
+          waitForReply: entry.expectsCompletionMessage === true,
+          outcome,
+        });
+        entry.frozenResultText = captured?.trim() ? capFrozenResultText(captured) : null;
+      } catch {
+        entry.frozenResultText = null;
+      }
     }
     entry.frozenResultCapturedAt = Date.now();
+    const goalEvaluation = evaluateSubagentGoal({
+      goal: entry.completionGoal,
+      outcome,
+      finalText: entry.frozenResultText,
+    });
+    if (goalEvaluation) {
+      entry.goalEvaluation = goalEvaluation;
+    }
     return true;
   };
 

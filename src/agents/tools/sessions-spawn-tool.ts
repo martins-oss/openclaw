@@ -103,6 +103,12 @@ async function cleanupUntrackedAcpSession(sessionKey: string): Promise<void> {
 function createSessionsSpawnToolSchema(params: { acpAvailable: boolean }) {
   const schema = {
     task: Type.String(),
+    completionGoal: Type.Optional(
+      Type.String({
+        description:
+          "Optional success condition for this spawned session. The worker is instructed to report `Goal status:` in its final reply, and OpenClaw records a lightweight goal evaluation on completion.",
+      }),
+    ),
     label: Type.Optional(Type.String()),
     runtime: optionalStringEnum(
       params.acpAvailable ? SESSIONS_SPAWN_RUNTIMES : (["subagent"] as const),
@@ -213,6 +219,7 @@ export function createSessionsSpawnTool(
         );
       }
       const task = readStringParam(params, "task", { required: true });
+      const completionGoal = readStringParam(params, "completionGoal");
       const label = readStringParam(params, "label") ?? "";
       const runtime = params.runtime === "acp" ? "acp" : "subagent";
       const requestedAgentId = readStringParam(params, "agentId");
@@ -342,6 +349,7 @@ export function createSessionsSpawnTool(
               requesterOrigin,
               requesterDisplayKey,
               task,
+              completionGoal,
               cleanup: trackedCleanup,
               label: label || undefined,
               runTimeoutSeconds,
@@ -367,6 +375,7 @@ export function createSessionsSpawnTool(
       const result = await spawnSubagentDirect(
         {
           task,
+          completionGoal,
           label: label || undefined,
           agentId: requestedAgentId,
           model: modelOverride,

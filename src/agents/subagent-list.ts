@@ -37,6 +37,8 @@ export type SubagentListItem = {
   label: string;
   task: string;
   status: string;
+  completionGoal?: string;
+  goalEvaluation?: SubagentRunRecord["goalEvaluation"];
   pendingDescendants: number;
   runtime: string;
   runtimeMs: number;
@@ -255,7 +257,8 @@ export function buildSubagentList(params: {
     const runtime = formatDurationCompact(runtimeMs) ?? "n/a";
     const label = truncateLine(resolveSubagentLabel(entry), 48);
     const task = truncateLine(entry.task.trim(), params.taskMaxChars ?? 72);
-    const line = `${index}. ${label} (${resolveModelDisplay(sessionEntry, entry.model)}, ${runtime}${usageText ? `, ${usageText}` : ""}) ${status}${normalizeLowercaseStringOrEmpty(task) !== normalizeLowercaseStringOrEmpty(label) ? ` - ${task}` : ""}`;
+    const goalText = entry.goalEvaluation ? `, goal:${entry.goalEvaluation.status}` : "";
+    const line = `${index}. ${label} (${resolveModelDisplay(sessionEntry, entry.model)}, ${runtime}${usageText ? `, ${usageText}` : ""}${goalText}) ${status}${normalizeLowercaseStringOrEmpty(task) !== normalizeLowercaseStringOrEmpty(label) ? ` - ${task}` : ""}`;
     const view: SubagentListItem = {
       index,
       line,
@@ -264,6 +267,8 @@ export function buildSubagentList(params: {
       label,
       task,
       status,
+      completionGoal: entry.completionGoal,
+      goalEvaluation: entry.goalEvaluation,
       pendingDescendants,
       runtime,
       runtimeMs,

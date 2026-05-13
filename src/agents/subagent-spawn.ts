@@ -24,6 +24,7 @@ import {
 } from "./subagent-attachments.js";
 import { resolveSubagentCapabilities } from "./subagent-capabilities.js";
 import { getSubagentDepthFromSessionStore } from "./subagent-depth.js";
+import { normalizeSubagentCompletionGoal } from "./subagent-goal-state.js";
 import { buildSubagentInitialUserMessage } from "./subagent-initial-user-message.js";
 import { countActiveRunsForSession, registerSubagentRun } from "./subagent-registry.js";
 import { resolveSubagentSpawnAcceptedNote } from "./subagent-spawn-accepted-note.js";
@@ -113,6 +114,7 @@ const MAX_SUBAGENT_AGENT_GATEWAY_TIMEOUT_MS = 300_000;
 
 export type SpawnSubagentParams = {
   task: string;
+  completionGoal?: string;
   label?: string;
   agentId?: string;
   model?: string;
@@ -624,6 +626,7 @@ export async function spawnSubagentDirect(
   ctx: SpawnSubagentContext,
 ): Promise<SpawnSubagentResult> {
   const task = params.task;
+  const completionGoal = normalizeSubagentCompletionGoal(params.completionGoal);
   const label = params.label?.trim() || "";
   const requestedAgentId = params.agentId?.trim();
 
@@ -927,6 +930,7 @@ export async function spawnSubagentDirect(
     childSessionKey,
     label: label || undefined,
     task,
+    completionGoal,
     acpEnabled: isAcpRuntimeSpawnAvailable({
       config: cfg,
       sandboxed: childRuntime.sandboxed,
@@ -1157,6 +1161,7 @@ export async function spawnSubagentDirect(
       requesterOrigin,
       requesterDisplayKey,
       task,
+      completionGoal,
       cleanup,
       label: label || undefined,
       model: resolvedModel,

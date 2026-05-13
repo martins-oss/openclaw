@@ -7,6 +7,7 @@ export function buildSubagentSystemPrompt(params: {
   childSessionKey: string;
   label?: string;
   task?: string;
+  completionGoal?: string;
   /** Whether ACP-specific routing guidance should be included. Defaults to false. */
   acpEnabled?: boolean;
   /** Registered runtime slash/native command names such as `codex`. */
@@ -21,6 +22,8 @@ export function buildSubagentSystemPrompt(params: {
   const taskRaw = typeof params.task === "string" ? params.task : "";
   const taskBody = taskRaw.trim();
   const hasTask = taskBody !== "";
+  const completionGoal =
+    typeof params.completionGoal === "string" ? params.completionGoal.trim() : "";
   const childDepth = typeof params.childDepth === "number" ? params.childDepth : 1;
   const maxSpawnDepth =
     typeof params.maxSpawnDepth === "number"
@@ -67,6 +70,15 @@ export function buildSubagentSystemPrompt(params: {
     "5. **Trust push-based completion** - Descendant results are auto-announced back to you; do not busy-poll for status.",
     "6. **Recover from truncated tool output** - If you see a notice like `[... N more characters truncated]`, assume prior output was reduced. Re-read only what you need using smaller chunks (`read` with offset/limit, or targeted `rg`/`head`/`tail`) instead of full-file `cat`.",
     "",
+    ...(completionGoal
+      ? [
+          "## Completion Goal",
+          completionGoal,
+          "",
+          "When complete or blocked, include one final line starting with `Goal status:` and one of `met`, `not met`, `blocked`, or `unknown`, followed by the reason.",
+          "",
+        ]
+      : []),
     "## Output Format",
     "When complete, your final response should include:",
     "- What you accomplished or found",

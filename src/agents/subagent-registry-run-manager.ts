@@ -44,6 +44,7 @@ export type RegisterSubagentRunParams = {
   requesterOrigin?: DeliveryContext;
   requesterDisplayKey: string;
   task: string;
+  completionGoal?: string;
   cleanup: "delete" | "keep";
   label?: string;
   model?: string;
@@ -340,6 +341,7 @@ export function createSubagentRunManager(params: {
       requesterOrigin,
       requesterDisplayKey: registerParams.requesterDisplayKey,
       task: registerParams.task,
+      completionGoal: registerParams.completionGoal,
       cleanup: registerParams.cleanup,
       expectsCompletionMessage: registerParams.expectsCompletionMessage,
       spawnMode,
