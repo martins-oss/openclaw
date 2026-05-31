@@ -90,6 +90,29 @@ describe("web_search unsupported filter response", () => {
       docs: "https://docs.openclaw.ai/tools/web",
     });
   });
+
+  it("rejects object-valued time range filters for providers that cannot honor them", () => {
+    expect(
+      buildUnsupportedSearchFilterResponse(
+        { time_range_filter: { start_date: "2026-03-19", granularity: "day" } },
+        "gemini",
+      ),
+    ).toEqual({
+      error: "unsupported_time_range_filter",
+      message:
+        "time_range_filter filtering is not supported by the gemini provider. Only Brave and Perplexity support time filtering.",
+      docs: "https://docs.openclaw.ai/tools/web",
+    });
+  });
+
+  it("rejects array-valued time range filters for providers that cannot honor them", () => {
+    expect(buildUnsupportedSearchFilterResponse({ time_range_filter: ["day"] }, "kimi")).toEqual({
+      error: "unsupported_time_range_filter",
+      message:
+        "time_range_filter filtering is not supported by the kimi provider. Only Brave and Perplexity support time filtering.",
+      docs: "https://docs.openclaw.ai/tools/web",
+    });
+  });
 });
 
 describe("web_search scoped config merge", () => {

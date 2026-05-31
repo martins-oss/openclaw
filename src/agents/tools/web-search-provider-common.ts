@@ -40,7 +40,8 @@ type UnsupportedWebSearchFilterName =
   | "language"
   | "freshness"
   | "date_after"
-  | "date_before";
+  | "date_before"
+  | "time_range_filter";
 
 export const DEFAULT_SEARCH_COUNT = 5;
 export const MAX_SEARCH_COUNT = 10;
@@ -308,9 +309,19 @@ export function writeCachedSearchPayload(
 function readUnsupportedSearchFilter(
   params: Record<string, unknown>,
 ): UnsupportedWebSearchFilterName | undefined {
-  for (const name of ["country", "language", "freshness", "date_after", "date_before"] as const) {
+  for (const name of [
+    "country",
+    "language",
+    "freshness",
+    "date_after",
+    "date_before",
+    "time_range_filter",
+  ] as const) {
     const value = params[name];
     if (typeof value === "string" && value.trim()) {
+      return name;
+    }
+    if (value && typeof value === "object") {
       return name;
     }
   }
@@ -329,6 +340,8 @@ function describeUnsupportedSearchFilter(name: UnsupportedWebSearchFilterName): 
     case "date_after":
     case "date_before":
       return "date_after/date_before filtering";
+    case "time_range_filter":
+      return "time_range_filter filtering";
   }
   throw new Error("Unsupported web search filter");
 }
@@ -351,12 +364,17 @@ export function buildUnsupportedSearchFilterResponse(
 
   const label = describeUnsupportedSearchFilter(unsupported);
   const supportedLabel =
-    unsupported === "date_after" || unsupported === "date_before" ? "date filtering" : label;
+    unsupported === "date_after" || unsupported === "date_before"
+      ? "date filtering"
+      : unsupported === "time_range_filter"
+        ? "time filtering"
+        : label;
 
   return {
-    error: unsupported.startsWith("date_")
-      ? "unsupported_date_filter"
-      : `unsupported_${unsupported}`,
+    error:
+      unsupported === "date_after" || unsupported === "date_before"
+        ? "unsupported_date_filter"
+        : `unsupported_${unsupported}`,
     message: `${label} is not supported by the ${provider} provider. Only Brave and Perplexity support ${supportedLabel}.`,
     docs,
   };
