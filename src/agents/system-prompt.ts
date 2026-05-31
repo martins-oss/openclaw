@@ -51,7 +51,7 @@ const CONTEXT_FILE_ORDER = new Map<string, number>([
   ["memory.md", 70],
 ]);
 
-const DYNAMIC_CONTEXT_FILE_BASENAMES = new Set(["heartbeat.md"]);
+const DYNAMIC_CONTEXT_FILE_BASENAMES = new Set<string>();
 const DEFAULT_HEARTBEAT_PROMPT_CONTEXT_BLOCK =
   "Default heartbeat prompt:\n`Read HEARTBEAT.md if it exists (workspace context). Follow it strictly. Do not infer or repeat old tasks from prior chats. If nothing needs attention, reply HEARTBEAT_OK.`";
 function normalizeContextFilePath(pathValue: string): string {
@@ -702,6 +702,10 @@ export function buildAgentSystemPrompt(params: {
   const lines = [
     "You are a personal assistant running inside OpenClaw.",
     "",
+    ...buildOverridablePromptSection({
+      override: providerStablePrefix,
+      fallback: [],
+    }),
     "## Tooling",
     "Tool availability (filtered by policy):",
     "Tool names are case-sensitive. Call tools exactly as listed.",
@@ -768,10 +772,6 @@ export function buildAgentSystemPrompt(params: {
       fallback: buildExecutionBiasSection({
         isMinimal,
       }),
-    }),
-    ...buildOverridablePromptSection({
-      override: providerStablePrefix,
-      fallback: [],
     }),
     ...safetySection,
     "## OpenClaw CLI Quick Reference",

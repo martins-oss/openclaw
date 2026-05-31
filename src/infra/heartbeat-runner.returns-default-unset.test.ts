@@ -1404,6 +1404,70 @@ describe("runHeartbeatOnce", () => {
     }
   });
 
+  it("does not duplicate HEARTBEAT.md directives in periodic task prompts", async () => {
+    const tmpDir = await createCaseDir("openclaw-hb-periodic");
+    const storePath = path.join(tmpDir, "sessions.json");
+    const workspaceDir = path.join(tmpDir, "workspace");
+    await fs.mkdir(workspaceDir, { recursive: true });
+    await fs.writeFile(
+      path.join(workspaceDir, "HEARTBEAT.md"),
+      `# HEARTBEAT.md
+
+tasks:
+  - name: cache-audit
+    interval: 5m
+    prompt: "Check cache metrics"
+
+Standing directive: avoid noisy updates.
+`,
+      "utf-8",
+    );
+
+    const cfg: OpenClawConfig = {
+      agents: {
+        defaults: {
+          workspace: workspaceDir,
+          heartbeat: { every: "5m", target: "whatsapp" },
+        },
+      },
+      channels: { whatsapp: { allowFrom: ["*"] } },
+      session: { store: storePath },
+    };
+    const sessionKey = resolveMainSessionKey(cfg);
+    await fs.writeFile(
+      storePath,
+      JSON.stringify({
+        [sessionKey]: {
+          sessionId: "sid",
+          updatedAt: Date.now(),
+          lastChannel: "whatsapp",
+          lastTo: "120363401234567890@g.us",
+        },
+      }),
+    );
+
+    const replySpy = vi.fn().mockResolvedValue({ text: "HEARTBEAT_OK" });
+    const sendWhatsApp = vi
+      .fn<
+        (to: string, text: string, opts?: unknown) => Promise<{ messageId: string; toJid: string }>
+      >()
+      .mockResolvedValue({ messageId: "m1", toJid: "jid" });
+
+    const res = await runHeartbeatOnce({
+      cfg,
+      deps: createHeartbeatDeps(sendWhatsApp, { getReplyFromConfig: replySpy }),
+    });
+
+    expect(res.status).toBe("ran");
+    expect(replySpy).toHaveBeenCalledTimes(1);
+    const calledCtx = replySpy.mock.calls[0]?.[0] as { Body?: string };
+    expect(calledCtx.Body).toContain("Run the following periodic tasks from HEARTBEAT.md");
+    expect(calledCtx.Body).toContain("Use the injected HEARTBEAT.md workspace context");
+    expect(calledCtx.Body).toContain("use workspace file");
+    expect(calledCtx.Body).not.toContain("Additional context from HEARTBEAT.md");
+    expect(calledCtx.Body).not.toContain("Standing directive: avoid noisy updates.");
+  });
+
   it("applies HEARTBEAT.md gating rules across file states and triggers", async () => {
     const cases: Array<{
       name: string;

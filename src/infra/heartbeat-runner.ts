@@ -695,20 +695,16 @@ function resolveHeartbeatRunPrompt(params: {
 
     if (dueTasks.length > 0) {
       const taskList = dueTasks.map((task) => `- ${task.name}: ${task.prompt}`).join("\n");
-      let prompt = `Run the following periodic tasks (only those due based on their intervals):
+      const prompt = appendHeartbeatWorkspacePathHint(
+        `Run the following periodic tasks from HEARTBEAT.md (only those due based on their intervals):
 
 ${taskList}
 
-After completing all due tasks, reply HEARTBEAT_OK.`;
+Use the injected HEARTBEAT.md workspace context for any standing directives that apply; do not duplicate or re-quote it.
 
-      if (params.heartbeatFileContent) {
-        const directives = params.heartbeatFileContent
-          .replace(/^[\s\S]*?^tasks:[\s\S]*?(?=^[^\s]|^$)/m, "")
-          .trim();
-        if (directives) {
-          prompt += `\n\nAdditional context from HEARTBEAT.md:\n${directives}`;
-        }
-      }
+After completing all due tasks, reply HEARTBEAT_OK.`,
+        params.workspaceDir,
+      );
       return { prompt, hasExecCompletion: false, hasCronEvents: false };
     }
     return { prompt: null, hasExecCompletion: false, hasCronEvents: false };

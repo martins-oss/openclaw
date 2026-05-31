@@ -645,6 +645,37 @@ describe("buildAgentSystemPrompt", () => {
     expect(prompt).toContain("Bravo");
   });
 
+  it("keeps provider cache overlay and HEARTBEAT.md in the stable prompt prefix", () => {
+    const prompt = buildAgentSystemPrompt({
+      workspaceDir: "/tmp/openclaw",
+      runtimeInfo: {
+        host: "host",
+        model: "openai/gpt-5.5",
+      },
+      promptContribution: {
+        stablePrefix: "## Provider Stable\n\nStable guidance.",
+        dynamicSuffix: "## Provider Dynamic\n\nDynamic guidance.",
+      },
+      contextFiles: [
+        { path: "HEARTBEAT.md", content: "Check assigned work." },
+        { path: "AGENTS.md", content: "Agent guidance." },
+      ],
+    });
+
+    const stableIndex = prompt.indexOf("## Provider Stable");
+    const toolingIndex = prompt.indexOf("## Tooling");
+    const heartbeatIndex = prompt.indexOf("## HEARTBEAT.md");
+    const boundaryIndex = prompt.indexOf("<!-- OPENCLAW_CACHE_BOUNDARY -->");
+    const runtimeIndex = prompt.indexOf("## Runtime");
+
+    expect(stableIndex).toBeGreaterThan(-1);
+    expect(toolingIndex).toBeGreaterThan(stableIndex);
+    expect(heartbeatIndex).toBeGreaterThan(-1);
+    expect(heartbeatIndex).toBeLessThan(boundaryIndex);
+    expect(boundaryIndex).toBeGreaterThan(-1);
+    expect(runtimeIndex).toBeGreaterThan(boundaryIndex);
+  });
+
   it("ignores context files with missing or blank paths", () => {
     const prompt = buildAgentSystemPrompt({
       workspaceDir: "/tmp/openclaw",
