@@ -49,6 +49,9 @@ vi.mock("./dotenv.js", () => ({
 }));
 
 vi.mock("../infra/env.js", () => ({
+  isTruthyEnvValue: vi.fn((value?: string) =>
+    ["1", "on", "true", "yes"].includes(value?.trim().toLowerCase() ?? ""),
+  ),
   normalizeEnv: normalizeEnvMock,
 }));
 
