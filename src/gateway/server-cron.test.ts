@@ -1,3 +1,4 @@
+import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -326,26 +327,39 @@ describe("buildGatewayCronService", () => {
     const cfg = createCronConfig("server-cron-invalid-webhook");
     loadConfigMock.mockReturnValue(cfg);
 
+    await fs.mkdir(path.dirname(cfg.cron!.store!), { recursive: true });
+    await fs.writeFile(
+      cfg.cron!.store!,
+      JSON.stringify({
+        version: 1,
+        jobs: [
+          {
+            id: "invalid-webhook-target",
+            name: "invalid-webhook-target",
+            enabled: true,
+            createdAtMs: 1,
+            updatedAtMs: 1,
+            schedule: { kind: "at", at: new Date(1).toISOString() },
+            sessionTarget: "main",
+            wakeMode: "next-heartbeat",
+            payload: { kind: "systemEvent", text: "hello" },
+            delivery: { mode: "webhook", to: "not-a-webhook" },
+            state: { nextRunAtMs: 1 },
+          },
+        ],
+      }),
+    );
+
     const state = buildGatewayCronService({
       cfg,
       deps: {} as CliDeps,
       broadcast: () => {},
     });
     try {
-      const job = await state.cron.add({
-        name: "invalid-webhook-target",
-        enabled: true,
-        schedule: { kind: "at", at: new Date(1).toISOString() },
-        sessionTarget: "main",
-        wakeMode: "next-heartbeat",
-        payload: { kind: "systemEvent", text: "hello" },
-        delivery: { mode: "webhook", to: "not-a-webhook" },
-      });
-
-      await state.cron.run(job.id, "force");
+      await state.cron.start();
 
       expect(fetchWithSsrFGuardMock).not.toHaveBeenCalled();
-      expect(state.cron.getJob(job.id)?.state).toMatchObject({
+      expect(state.cron.getJob("invalid-webhook-target")?.state).toMatchObject({
         lastStatus: "error",
         lastDeliveryStatus: "not-delivered",
       });

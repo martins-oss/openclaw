@@ -903,13 +903,20 @@ export async function onTimer(state: CronServiceState) {
       const taskRunId = tryCreateCronTaskRun({ state, job, startedAt });
 
       try {
-        const result = await executeJobCoreWithTimeout(state, job);
+        const endedAt = state.deps.nowMs();
+        const result = await acknowledgeFinalizedCronDelivery({
+          state,
+          job,
+          result: await executeJobCoreWithTimeout(state, job),
+          startedAt,
+          endedAt,
+        });
         return {
           jobId: id,
           taskRunId,
           ...result,
           startedAt,
-          endedAt: state.deps.nowMs(),
+          endedAt,
         };
       } catch (err) {
         const errorText = normalizeCronRunErrorText(err);
@@ -1206,7 +1213,14 @@ async function runStartupCatchupCandidate(
   });
   emit(state, { jobId: candidate.job.id, action: "started", runAtMs: startedAt });
   try {
-    const result = await executeJobCoreWithTimeout(state, candidate.job);
+    const endedAt = state.deps.nowMs();
+    const result = await acknowledgeFinalizedCronDelivery({
+      state,
+      job: candidate.job,
+      result: await executeJobCoreWithTimeout(state, candidate.job),
+      startedAt,
+      endedAt,
+    });
     return {
       jobId: candidate.jobId,
       taskRunId,
@@ -1220,7 +1234,7 @@ async function runStartupCatchupCandidate(
       provider: result.provider,
       usage: result.usage,
       startedAt,
-      endedAt: state.deps.nowMs(),
+      endedAt,
     };
   } catch (err) {
     return {

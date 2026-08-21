@@ -1,7 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import { CronService } from "./service.js";
+import { CronService, type CronServiceDeps } from "./service.js";
 import { setupCronServiceSuite } from "./service.test-harness.js";
 import type { CronEvent } from "./service/state.js";
 import { createCronServiceState } from "./service/state.js";
@@ -23,6 +23,7 @@ describe("CronService restart catch-up", () => {
     enqueueSystemEvent: ReturnType<typeof vi.fn>;
     requestHeartbeatNow: ReturnType<typeof vi.fn>;
     onEvent?: ReturnType<typeof vi.fn>;
+    onPostDelivery?: CronServiceDeps["onPostDelivery"];
   }) {
     return new CronService({
       storePath: params.storePath,
@@ -32,6 +33,7 @@ describe("CronService restart catch-up", () => {
       requestHeartbeatNow: params.requestHeartbeatNow as never,
       runIsolatedAgentJob: vi.fn(async () => ({ status: "ok" as const })) as never,
       onEvent: params.onEvent as ((evt: CronEvent) => void) | undefined,
+      onPostDelivery: params.onPostDelivery,
     });
   }
 
@@ -81,6 +83,43 @@ describe("CronService restart catch-up", () => {
       await store.cleanup();
     }
   }
+
+  it("persists a required webhook acknowledgement failure for startup catch-up", async () => {
+    const dueAt = Date.parse("2025-12-13T15:00:00.000Z");
+    const store = await makeStorePath();
+    const acknowledgement = vi.fn(async () => ({ delivered: false, error: "webhook failed" }));
+    const enqueueSystemEvent = vi.fn();
+    const requestHeartbeatNow = vi.fn();
+
+    await writeStoreJobs(store.storePath, [
+      {
+        ...createOverdueEveryJob("restart-webhook-failure", dueAt),
+        delivery: { mode: "webhook", to: "https://example.test/hook" },
+      },
+    ]);
+
+    const cron = createRestartCronService({
+      storePath: store.storePath,
+      enqueueSystemEvent,
+      requestHeartbeatNow,
+      onPostDelivery: acknowledgement,
+    });
+    try {
+      await cron.start();
+      const updated = (await cron.list({ includeDisabled: true })).find(
+        (job) => job.id === "restart-webhook-failure",
+      );
+      expect(acknowledgement).toHaveBeenCalledWith(
+        expect.objectContaining({ jobId: "restart-webhook-failure" }),
+      );
+      expect(updated?.state.lastStatus).toBe("error");
+      expect(updated?.state.lastDeliveryStatus).toBe("not-delivered");
+      expect(updated?.state.lastDeliveryError).toBe("webhook failed");
+    } finally {
+      cron.stop();
+      await store.cleanup();
+    }
+  });
 
   it("executes an overdue recurring job immediately on start", async () => {
     const dueAt = Date.parse("2025-12-13T15:00:00.000Z");
