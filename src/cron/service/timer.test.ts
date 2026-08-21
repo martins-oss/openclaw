@@ -90,6 +90,55 @@ describe("cron service timer seam coverage", () => {
     timeoutSpy.mockRestore();
   });
 
+  it("reports normal timer delivery timing after execution completes", async () => {
+    const { storePath } = await makeStorePath();
+    const startedAt = Date.parse("2026-03-23T12:00:00.000Z");
+    let now = startedAt;
+    const acknowledgement = vi.fn(async () => ({ delivered: true }));
+
+    await writeCronStoreSnapshot({
+      storePath,
+      jobs: [
+        {
+          ...createDueMainJob({ now: startedAt, wakeMode: "next-heartbeat" }),
+          id: "timer-delivery-timing",
+          sessionTarget: "isolated",
+          payload: { kind: "agentTurn", message: "run timer delivery timing" },
+          delivery: { mode: "announce", channel: "discord", to: "123" },
+        },
+      ],
+    });
+
+    const state = createCronServiceState({
+      storePath,
+      cronEnabled: true,
+      log: logger,
+      nowMs: () => now,
+      enqueueSystemEvent: vi.fn(),
+      requestHeartbeatNow: vi.fn(),
+      runIsolatedAgentJob: vi.fn(async () => {
+        now += 61_000;
+        return { status: "ok" as const };
+      }),
+      onPostDelivery: acknowledgement,
+    });
+
+    await onTimer(state);
+
+    expect(acknowledgement).toHaveBeenCalledWith(
+      expect.objectContaining({
+        jobId: "timer-delivery-timing",
+        durationMs: 61_000,
+        nextRunAtMs: startedAt + 120_000,
+      }),
+    );
+    const persisted = await loadCronStore(storePath);
+    expect(persisted.jobs[0]?.state).toMatchObject({
+      lastDurationMs: 61_000,
+      nextRunAtMs: startedAt + 120_000,
+    });
+  });
+
   it("keeps scheduler progress when task ledger creation fails", async () => {
     const { storePath } = await makeStorePath();
     const now = Date.parse("2026-03-23T12:00:00.000Z");
