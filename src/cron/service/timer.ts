@@ -92,8 +92,7 @@ export async function executeJobCoreWithTimeout(
 ): Promise<Awaited<ReturnType<typeof executeJobCore>>> {
   const jobTimeoutMs = resolveCronJobTimeoutMs(job);
   if (typeof jobTimeoutMs !== "number") {
-    const result = await executeJobCore(state, job);
-    return await applyPostDeliveryAcknowledgement(state, job, result, state.deps.nowMs());
+    return await executeJobCore(state, job);
   }
 
   const runAbortController = new AbortController();
@@ -117,13 +116,12 @@ export async function executeJobCoreWithTimeout(
     startTimeout();
   }
   try {
-    const result = await Promise.race([
+    return await Promise.race([
       executeJobCore(state, job, runAbortController.signal, {
         onExecutionStarted: deferTimeoutUntilExecutionStart ? startTimeout : undefined,
       }),
       timeoutPromise,
     ]);
-    return await applyPostDeliveryAcknowledgement(state, job, result, state.deps.nowMs());
   } finally {
     if (timeoutId) {
       clearTimeout(timeoutId);
@@ -301,7 +299,12 @@ function resolveDeliveryState(params: { job: CronJob; delivered?: boolean }): {
 async function applyPostDeliveryAcknowledgement<
   TResult extends CronRunOutcome &
     CronRunTelemetry & { delivered?: boolean; delivery?: CronDeliveryTrace },
->(state: CronServiceState, job: CronJob, coreResult: TResult, runAtMs: number): Promise<TResult> {
+>(
+  state: CronServiceState,
+  job: CronJob,
+  coreResult: TResult,
+  event: Pick<CronEvent, "runAtMs" | "durationMs" | "nextRunAtMs" | "deliveryError">,
+): Promise<TResult> {
   if (!state.deps.onPostDelivery) {
     return coreResult;
   }
@@ -318,7 +321,10 @@ async function applyPostDeliveryAcknowledgement<
       delivery: coreResult.delivery,
       sessionId: coreResult.sessionId,
       sessionKey: coreResult.sessionKey,
-      runAtMs,
+      runAtMs: event.runAtMs,
+      durationMs: event.durationMs,
+      nextRunAtMs: event.nextRunAtMs,
+      deliveryError: event.deliveryError,
       model: coreResult.model,
       provider: coreResult.provider,
       usage: coreResult.usage,
@@ -508,6 +514,8 @@ export function applyJobResult(
   opts?: {
     // Preserve recurring "every" anchors for manual force runs.
     preserveSchedule?: boolean;
+    /** Suppress alerts when calculating a detached pre-delivery state preview. */
+    emitFailureAlert?: boolean;
   },
 ): boolean {
   const prevLastRunAtMs = job.state.lastRunAtMs;
@@ -543,24 +551,28 @@ export function applyJobResult(
   if (result.status === "error") {
     job.state.consecutiveErrors = (job.state.consecutiveErrors ?? 0) + 1;
     job.state.consecutiveSkipped = 0;
-    maybeEmitFailureAlert(state, {
-      job,
-      alertConfig,
-      status: "error",
-      error: result.error,
-      consecutiveCount: job.state.consecutiveErrors,
-    });
+    if (opts?.emitFailureAlert !== false) {
+      maybeEmitFailureAlert(state, {
+        job,
+        alertConfig,
+        status: "error",
+        error: result.error,
+        consecutiveCount: job.state.consecutiveErrors,
+      });
+    }
   } else if (result.status === "skipped") {
     job.state.consecutiveErrors = 0;
     job.state.consecutiveSkipped = (job.state.consecutiveSkipped ?? 0) + 1;
     if (alertConfig?.includeSkipped) {
-      maybeEmitFailureAlert(state, {
-        job,
-        alertConfig,
-        status: "skipped",
-        error: result.error,
-        consecutiveCount: job.state.consecutiveSkipped,
-      });
+      if (opts?.emitFailureAlert !== false) {
+        maybeEmitFailureAlert(state, {
+          job,
+          alertConfig,
+          status: "skipped",
+          error: result.error,
+          consecutiveCount: job.state.consecutiveSkipped,
+        });
+      }
     } else {
       job.state.lastFailureAlertAtMs = undefined;
     }
@@ -690,6 +702,38 @@ export function applyJobResult(
   }
 
   return shouldDelete;
+}
+
+export async function acknowledgeFinalizedCronDelivery<
+  TResult extends CronRunOutcome &
+    CronRunTelemetry & { delivered?: boolean; delivery?: CronDeliveryTrace },
+>(params: {
+  state: CronServiceState;
+  job: CronJob;
+  result: TResult;
+  startedAt: number;
+  endedAt: number;
+  preserveSchedule?: boolean;
+}): Promise<TResult> {
+  const preview = structuredClone(params.job);
+  applyJobResult(
+    params.state,
+    preview,
+    {
+      status: params.result.status,
+      error: params.result.error,
+      delivered: params.result.delivered,
+      startedAt: params.startedAt,
+      endedAt: params.endedAt,
+    },
+    { preserveSchedule: params.preserveSchedule, emitFailureAlert: false },
+  );
+  return await applyPostDeliveryAcknowledgement(params.state, params.job, params.result, {
+    runAtMs: params.startedAt,
+    durationMs: preview.state.lastDurationMs,
+    nextRunAtMs: preview.state.nextRunAtMs,
+    deliveryError: preview.state.lastDeliveryError,
+  });
 }
 
 function applyOutcomeToStoredJob(state: CronServiceState, result: TimedCronRunOutcome): void {
@@ -1474,6 +1518,13 @@ export async function executeJob(
   }
 
   const endedAt = state.deps.nowMs();
+  coreResult = await acknowledgeFinalizedCronDelivery({
+    state,
+    job,
+    result: coreResult,
+    startedAt,
+    endedAt,
+  });
   const shouldDelete = applyJobResult(state, job, {
     status: coreResult.status,
     error: coreResult.error,

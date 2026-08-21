@@ -275,6 +275,53 @@ describe("buildGatewayCronService", () => {
     }
   });
 
+  it("posts finalized manual-run timing in the required webhook payload", async () => {
+    vi.useFakeTimers();
+    const startedAt = new Date("2026-08-21T17:00:00.000Z");
+    vi.setSystemTime(startedAt);
+    const cfg = createCronConfig("server-cron-finalized-webhook-event");
+    loadConfigMock.mockReturnValue(cfg);
+    fetchWithSsrFGuardMock.mockResolvedValue({
+      response: { ok: true, status: 200 },
+      release: async () => {},
+    });
+    runCronIsolatedAgentTurnMock.mockImplementationOnce(async () => {
+      vi.setSystemTime(new Date(startedAt.getTime() + 250));
+      return { status: "ok", summary: "finished" };
+    });
+
+    const state = buildGatewayCronService({
+      cfg,
+      deps: {} as CliDeps,
+      broadcast: () => {},
+    });
+    try {
+      const job = await state.cron.add({
+        name: "finalized-webhook-event",
+        enabled: true,
+        schedule: { kind: "every", everyMs: 60_000 },
+        sessionTarget: "isolated",
+        payload: { kind: "agentTurn", message: "hello" },
+        delivery: { mode: "webhook", to: "https://example.com/cron-finished" },
+      });
+
+      await state.cron.run(job.id, "force");
+
+      const body = JSON.parse(
+        String(fetchWithSsrFGuardMock.mock.calls[0]?.[0]?.init?.body),
+      ) as Record<string, unknown>;
+      expect(body).toMatchObject({
+        action: "finished",
+        runAtMs: startedAt.getTime(),
+        durationMs: 250,
+        nextRunAtMs: expect.any(Number),
+      });
+    } finally {
+      state.cron.stop();
+      vi.useRealTimers();
+    }
+  });
+
   it("persists a required invalid webhook target as not delivered", async () => {
     const cfg = createCronConfig("server-cron-invalid-webhook");
     loadConfigMock.mockReturnValue(cfg);
