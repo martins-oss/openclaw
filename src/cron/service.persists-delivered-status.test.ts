@@ -48,6 +48,9 @@ function createIsolatedCronWithFinishedBarrier(params: {
   storePath: string;
   delivered?: boolean;
   error?: string;
+  onPostDelivery?: (
+    evt: { jobId: string; deliveryStatus?: string },
+  ) => Promise<{ delivered?: boolean }>;
   onFinished?: (evt: { jobId: string; delivered?: boolean; deliveryStatus?: string }) => void;
 }) {
   const finished = createFinishedBarrier();
@@ -63,6 +66,7 @@ function createIsolatedCronWithFinishedBarrier(params: {
       ...(params.error === undefined ? {} : { error: params.error }),
       ...(params.delivered === undefined ? {} : { delivered: params.delivered }),
     })),
+    onPostDelivery: params.onPostDelivery,
     onEvent: (evt) => {
       if (evt.action === "finished") {
         params.onFinished?.({
@@ -244,5 +248,32 @@ describe("CronService persists delivered status", () => {
     expect(capturedEvent).toBeDefined();
     expect(capturedEvent?.delivered).toBe(true);
     expect(capturedEvent?.deliveryStatus).toBe("delivered");
+  });
+
+  it("waits for the scheduler-owned post-delivery acknowledgement before persisting success", async () => {
+    const store = await makeStorePath();
+    const acknowledgement = vi.fn(async () => ({ delivered: true }));
+    const { cron, finished } = createIsolatedCronWithFinishedBarrier({
+      storePath: store.storePath,
+      delivered: undefined,
+      onPostDelivery: acknowledgement,
+    });
+
+    await cron.start();
+    try {
+      const { job, updated } = await runSingleJobAndReadState({
+        cron,
+        finished,
+        job: buildAnnounceIsolatedAgentTurnJob("scheduler-acknowledgement"),
+      });
+
+      expect(acknowledgement).toHaveBeenCalledWith(
+        expect.objectContaining({ jobId: job.id, deliveryStatus: "unknown" }),
+      );
+      expect(updated?.state.lastDelivered).toBe(true);
+      expect(updated?.state.lastDeliveryStatus).toBe("delivered");
+    } finally {
+      cron.stop();
+    }
   });
 });

@@ -115,6 +115,13 @@ export type CronServiceDeps = {
     mode?: "announce" | "webhook";
     accountId?: string;
   }) => Promise<void>;
+  /**
+   * Allows the scheduler host to await a transport acknowledgement before it
+   * commits the terminal delivery state for a run.
+   */
+  onPostDelivery?: (
+    evt: CronEvent,
+  ) => Promise<{ delivered?: boolean; error?: string } | undefined>;
   onEvent?: (evt: CronEvent) => void;
 };
 

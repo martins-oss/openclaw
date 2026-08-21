@@ -1422,6 +1422,41 @@ export async function executeJob(
     coreResult = { status: "error", error: String(err) };
   }
 
+  if (state.deps.onPostDelivery && resolveCronDeliveryPlan(job).requested) {
+    const preDeliveryState = resolveDeliveryState({ job, delivered: coreResult.delivered });
+    try {
+      const acknowledgement = await state.deps.onPostDelivery({
+        jobId: job.id,
+        action: "finished",
+        status: coreResult.status,
+        error: coreResult.error,
+        summary: coreResult.summary,
+        delivered: coreResult.delivered,
+        deliveryStatus: preDeliveryState.status,
+        delivery: coreResult.delivery,
+        sessionId: coreResult.sessionId,
+        sessionKey: coreResult.sessionKey,
+        runAtMs: startedAt,
+        model: coreResult.model,
+        provider: coreResult.provider,
+        usage: coreResult.usage,
+      });
+      if (acknowledgement?.delivered !== undefined) {
+        coreResult.delivered = acknowledgement.delivered;
+      }
+      if (acknowledgement?.error) {
+        coreResult.error = acknowledgement.error;
+      }
+    } catch (err) {
+      coreResult.delivered = false;
+      coreResult.error = `post-delivery acknowledgement failed: ${String(err)}`;
+      state.deps.log.warn(
+        { jobId: job.id, err: String(err) },
+        "cron: post-delivery acknowledgement failed",
+      );
+    }
+  }
+
   const endedAt = state.deps.nowMs();
   const shouldDelete = applyJobResult(state, job, {
     status: coreResult.status,
