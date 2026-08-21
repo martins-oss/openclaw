@@ -243,6 +243,7 @@ export async function dispatchGatewayCronFinishedNotifications(params: {
 
   const deliverPrimaryWebhook = params.deliverPrimaryWebhook !== false;
   if (deliverPrimaryWebhook && !webhookTarget && params.job?.delivery?.mode === "webhook") {
+    const error = "webhook delivery requires a valid http(s) delivery.to URL";
     params.logger.warn(
       {
         jobId: params.evt.jobId,
@@ -250,6 +251,7 @@ export async function dispatchGatewayCronFinishedNotifications(params: {
       },
       "cron: skipped webhook delivery, delivery.to must be a valid http(s) URL",
     );
+    return { delivered: false, error };
   }
 
   if (
@@ -267,17 +269,26 @@ export async function dispatchGatewayCronFinishedNotifications(params: {
     );
   }
 
+  if (deliverPrimaryWebhook && webhookTarget && !params.evt.summary) {
+    const error = "webhook delivery requires a finished-event summary";
+    params.logger.warn(
+      { jobId: params.evt.jobId },
+      "cron: skipped webhook delivery because finished event has no summary",
+    );
+    return { delivered: false, error };
+  }
+
   const receipt =
-    deliverPrimaryWebhook && webhookTarget && params.evt.summary
+    deliverPrimaryWebhook && webhookTarget
       ? await postCronWebhook({
-        webhookUrl: webhookTarget.url,
-        webhookToken,
-        payload: params.evt,
-        logContext: { jobId: params.evt.jobId },
-        blockedLog: "cron: webhook delivery blocked by SSRF guard",
-        failedLog: "cron: webhook delivery failed",
-        logger: params.logger,
-      })
+          webhookUrl: webhookTarget.url,
+          webhookToken,
+          payload: params.evt,
+          logContext: { jobId: params.evt.jobId },
+          blockedLog: "cron: webhook delivery blocked by SSRF guard",
+          failedLog: "cron: webhook delivery failed",
+          logger: params.logger,
+        })
       : undefined;
 
   if (params.notifyFailureDestination !== false) {

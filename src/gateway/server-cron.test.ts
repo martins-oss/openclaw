@@ -275,6 +275,70 @@ describe("buildGatewayCronService", () => {
     }
   });
 
+  it("persists a required invalid webhook target as not delivered", async () => {
+    const cfg = createCronConfig("server-cron-invalid-webhook");
+    loadConfigMock.mockReturnValue(cfg);
+
+    const state = buildGatewayCronService({
+      cfg,
+      deps: {} as CliDeps,
+      broadcast: () => {},
+    });
+    try {
+      const job = await state.cron.add({
+        name: "invalid-webhook-target",
+        enabled: true,
+        schedule: { kind: "at", at: new Date(1).toISOString() },
+        sessionTarget: "main",
+        wakeMode: "next-heartbeat",
+        payload: { kind: "systemEvent", text: "hello" },
+        delivery: { mode: "webhook", to: "not-a-webhook" },
+      });
+
+      await state.cron.run(job.id, "force");
+
+      expect(fetchWithSsrFGuardMock).not.toHaveBeenCalled();
+      expect(state.cron.getJob(job.id)?.state).toMatchObject({
+        lastStatus: "error",
+        lastDeliveryStatus: "not-delivered",
+      });
+    } finally {
+      state.cron.stop();
+    }
+  });
+
+  it("persists a required webhook without a finished summary as not delivered", async () => {
+    const cfg = createCronConfig("server-cron-missing-webhook-summary");
+    loadConfigMock.mockReturnValue(cfg);
+    runCronIsolatedAgentTurnMock.mockResolvedValueOnce({ status: "ok" });
+
+    const state = buildGatewayCronService({
+      cfg,
+      deps: {} as CliDeps,
+      broadcast: () => {},
+    });
+    try {
+      const job = await state.cron.add({
+        name: "missing-webhook-summary",
+        enabled: true,
+        schedule: { kind: "at", at: new Date(1).toISOString() },
+        sessionTarget: "isolated",
+        payload: { kind: "agentTurn", message: "hello" },
+        delivery: { mode: "webhook", to: "https://example.com/cron-finished" },
+      });
+
+      await state.cron.run(job.id, "force");
+
+      expect(fetchWithSsrFGuardMock).not.toHaveBeenCalled();
+      expect(state.cron.getJob(job.id)?.state).toMatchObject({
+        lastStatus: "error",
+        lastDeliveryStatus: "not-delivered",
+      });
+    } finally {
+      state.cron.stop();
+    }
+  });
+
   it("passes custom session targets through to isolated cron runs", async () => {
     const tmpDir = path.join(os.tmpdir(), `server-cron-custom-session-${Date.now()}`);
     const cfg = {
