@@ -431,4 +431,46 @@ describe("CronService restart catch-up", () => {
 
     await store.cleanup();
   });
+
+  it("reports catch-up delivery timing after execution completes", async () => {
+    const store = await makeStorePath();
+    const startNow = Date.parse("2025-12-13T17:00:00.000Z");
+    let now = startNow;
+    const acknowledgement = vi.fn(async () => ({ delivered: true }));
+
+    await writeStoreJobs(store.storePath, [
+      {
+        ...createOverdueEveryJob("catchup-delivery-timing", startNow - 60_000),
+        sessionTarget: "isolated",
+        payload: { kind: "agentTurn", message: "catch up" },
+        delivery: { mode: "announce", channel: "discord", to: "123" },
+      },
+    ]);
+
+    const state = createCronServiceState({
+      cronEnabled: true,
+      storePath: store.storePath,
+      log: noopLogger,
+      nowMs: () => now,
+      enqueueSystemEvent: vi.fn(),
+      requestHeartbeatNow: vi.fn(),
+      runIsolatedAgentJob: vi.fn(async () => {
+        now += 6_000;
+        return { status: "ok" as const };
+      }),
+      onPostDelivery: acknowledgement,
+    });
+
+    try {
+      await runMissedJobs(state);
+      expect(acknowledgement).toHaveBeenCalledWith(
+        expect.objectContaining({
+          jobId: "catchup-delivery-timing",
+          durationMs: 6_000,
+        }),
+      );
+    } finally {
+      await store.cleanup();
+    }
+  });
 });
