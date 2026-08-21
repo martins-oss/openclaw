@@ -92,7 +92,8 @@ export async function executeJobCoreWithTimeout(
 ): Promise<Awaited<ReturnType<typeof executeJobCore>>> {
   const jobTimeoutMs = resolveCronJobTimeoutMs(job);
   if (typeof jobTimeoutMs !== "number") {
-    return await executeJobCore(state, job);
+    const result = await executeJobCore(state, job);
+    return await applyPostDeliveryAcknowledgement(state, job, result, state.deps.nowMs());
   }
 
   const runAbortController = new AbortController();
@@ -116,12 +117,13 @@ export async function executeJobCoreWithTimeout(
     startTimeout();
   }
   try {
-    return await Promise.race([
+    const result = await Promise.race([
       executeJobCore(state, job, runAbortController.signal, {
         onExecutionStarted: deferTimeoutUntilExecutionStart ? startTimeout : undefined,
       }),
       timeoutPromise,
     ]);
+    return await applyPostDeliveryAcknowledgement(state, job, result, state.deps.nowMs());
   } finally {
     if (timeoutId) {
       clearTimeout(timeoutId);
@@ -283,7 +285,8 @@ function resolveDeliveryState(params: { job: CronJob; delivered?: boolean }): {
   delivered?: boolean;
   status: CronDeliveryStatus;
 } {
-  if (!resolveCronDeliveryPlan(params.job).requested) {
+  const deliveryPlan = resolveCronDeliveryPlan(params.job);
+  if (!deliveryPlan.requested && deliveryPlan.mode !== "webhook") {
     return { status: "not-requested" };
   }
   if (params.delivered === true) {
@@ -293,6 +296,54 @@ function resolveDeliveryState(params: { job: CronJob; delivered?: boolean }): {
     return { delivered: false, status: "not-delivered" };
   }
   return { status: "unknown" };
+}
+
+async function applyPostDeliveryAcknowledgement<
+  TResult extends CronRunOutcome &
+    CronRunTelemetry & { delivered?: boolean; delivery?: CronDeliveryTrace },
+>(state: CronServiceState, job: CronJob, coreResult: TResult, runAtMs: number): Promise<TResult> {
+  if (!state.deps.onPostDelivery) {
+    return coreResult;
+  }
+  const preDeliveryState = resolveDeliveryState({ job, delivered: coreResult.delivered });
+  try {
+    const acknowledgement = await state.deps.onPostDelivery({
+      jobId: job.id,
+      action: "finished",
+      status: coreResult.status,
+      error: coreResult.error,
+      summary: coreResult.summary,
+      delivered: coreResult.delivered,
+      deliveryStatus: preDeliveryState.status,
+      delivery: coreResult.delivery,
+      sessionId: coreResult.sessionId,
+      sessionKey: coreResult.sessionKey,
+      runAtMs,
+      model: coreResult.model,
+      provider: coreResult.provider,
+      usage: coreResult.usage,
+    });
+    if (acknowledgement?.delivered !== undefined) {
+      coreResult.delivered = acknowledgement.delivered;
+      if (acknowledgement.delivered === false && job.delivery?.bestEffort !== true) {
+        coreResult.status = "error";
+      }
+    }
+    if (acknowledgement?.error) {
+      coreResult.error = acknowledgement.error;
+    }
+  } catch (err) {
+    coreResult.delivered = false;
+    if (job.delivery?.bestEffort !== true) {
+      coreResult.status = "error";
+    }
+    coreResult.error = `post-delivery acknowledgement failed: ${String(err)}`;
+    state.deps.log.warn(
+      { jobId: job.id, err: String(err) },
+      "cron: post-delivery acknowledgement failed",
+    );
+  }
+  return coreResult;
 }
 
 function normalizeCronMessageChannel(input: unknown): CronMessageChannel | undefined {
@@ -1420,47 +1471,6 @@ export async function executeJob(
     coreResult = await executeJobCoreWithTimeout(state, job);
   } catch (err) {
     coreResult = { status: "error", error: String(err) };
-  }
-
-  if (state.deps.onPostDelivery && resolveCronDeliveryPlan(job).requested) {
-    const preDeliveryState = resolveDeliveryState({ job, delivered: coreResult.delivered });
-    try {
-      const acknowledgement = await state.deps.onPostDelivery({
-        jobId: job.id,
-        action: "finished",
-        status: coreResult.status,
-        error: coreResult.error,
-        summary: coreResult.summary,
-        delivered: coreResult.delivered,
-        deliveryStatus: preDeliveryState.status,
-        delivery: coreResult.delivery,
-        sessionId: coreResult.sessionId,
-        sessionKey: coreResult.sessionKey,
-        runAtMs: startedAt,
-        model: coreResult.model,
-        provider: coreResult.provider,
-        usage: coreResult.usage,
-      });
-      if (acknowledgement?.delivered !== undefined) {
-        coreResult.delivered = acknowledgement.delivered;
-        if (acknowledgement.delivered === false && job.delivery?.bestEffort !== true) {
-          coreResult.status = "error";
-        }
-      }
-      if (acknowledgement?.error) {
-        coreResult.error = acknowledgement.error;
-      }
-    } catch (err) {
-      coreResult.delivered = false;
-      if (job.delivery?.bestEffort !== true) {
-        coreResult.status = "error";
-      }
-      coreResult.error = `post-delivery acknowledgement failed: ${String(err)}`;
-      state.deps.log.warn(
-        { jobId: job.id, err: String(err) },
-        "cron: post-delivery acknowledgement failed",
-      );
-    }
   }
 
   const endedAt = state.deps.nowMs();
