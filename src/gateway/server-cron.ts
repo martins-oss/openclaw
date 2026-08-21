@@ -257,11 +257,26 @@ export function buildGatewayCronService(params: {
         accountId,
       }),
     log: getChildLogger({ module: "cron", storePath }),
+    onPostDelivery: async (evt) => {
+      const job = cron.getJob(evt.jobId);
+      return await dispatchGatewayCronFinishedNotifications({
+        evt,
+        job,
+        deps: params.deps,
+        logger: cronLogger,
+        resolveCronAgent,
+        webhookToken: params.cfg.cron?.webhookToken,
+        legacyWebhook: params.cfg.cron?.webhook,
+        globalFailureDestination: params.cfg.cron?.failureDestination,
+        warnedLegacyWebhookJobs,
+        notifyFailureDestination: false,
+      });
+    },
     onEvent: (evt) => {
       params.broadcast("cron", evt, { dropIfSlow: true });
       if (evt.action === "finished") {
         const job = cron.getJob(evt.jobId);
-        dispatchGatewayCronFinishedNotifications({
+        void dispatchGatewayCronFinishedNotifications({
           evt,
           job,
           deps: params.deps,
@@ -271,6 +286,7 @@ export function buildGatewayCronService(params: {
           legacyWebhook: params.cfg.cron?.webhook,
           globalFailureDestination: params.cfg.cron?.failureDestination,
           warnedLegacyWebhookJobs,
+          deliverPrimaryWebhook: false,
         });
 
         const logPath = resolveCronRunLogPath({

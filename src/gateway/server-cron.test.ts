@@ -266,6 +266,10 @@ describe("buildGatewayCronService", () => {
           signal: expect.any(AbortSignal),
         },
       });
+      expect(state.cron.getJob(job.id)?.state).toMatchObject({
+        lastStatus: "error",
+        lastDeliveryStatus: "not-delivered",
+      });
     } finally {
       state.cron.stop();
     }

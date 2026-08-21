@@ -1443,12 +1443,18 @@ export async function executeJob(
       });
       if (acknowledgement?.delivered !== undefined) {
         coreResult.delivered = acknowledgement.delivered;
+        if (acknowledgement.delivered === false && job.delivery?.bestEffort !== true) {
+          coreResult.status = "error";
+        }
       }
       if (acknowledgement?.error) {
         coreResult.error = acknowledgement.error;
       }
     } catch (err) {
       coreResult.delivered = false;
+      if (job.delivery?.bestEffort !== true) {
+        coreResult.status = "error";
+      }
       coreResult.error = `post-delivery acknowledgement failed: ${String(err)}`;
       state.deps.log.warn(
         { jobId: job.id, err: String(err) },
