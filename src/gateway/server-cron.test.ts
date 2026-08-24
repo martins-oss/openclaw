@@ -5,6 +5,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { CliDeps } from "../cli/deps.js";
 import type { OpenClawConfig } from "../config/config.js";
 import { SsrFBlockedError } from "../infra/net/ssrf.js";
+import type { RunCronAgentTurnResult } from "../cron/isolated-agent.js";
 import { mergeMockedModule } from "../test-utils/vitest-module-mocks.js";
 
 const {
@@ -23,7 +24,9 @@ const {
   >(async () => ({ status: "ran", durationMs: 1 })),
   loadConfigMock: vi.fn(),
   fetchWithSsrFGuardMock: vi.fn(),
-  runCronIsolatedAgentTurnMock: vi.fn(async () => ({ status: "ok" as const, summary: "ok" })),
+  runCronIsolatedAgentTurnMock: vi.fn<
+    (...args: unknown[]) => Promise<RunCronAgentTurnResult>
+  >(async () => ({ status: "ok", summary: "ok" })),
   cleanupBrowserSessionsForLifecycleEndMock: vi.fn(async () => {}),
 }));
 
@@ -659,6 +662,83 @@ describe("buildGatewayCronService", () => {
           }),
         }),
       );
+    } finally {
+      state.cron.stop();
+    }
+  });
+
+  it("persists a required Discord announce acknowledgement failure", async () => {
+    const cfg = createCronConfig("server-cron-discord-announce-ack");
+    loadConfigMock.mockReturnValue(cfg);
+    runCronIsolatedAgentTurnMock.mockResolvedValueOnce({
+      status: "ok",
+      summary: "done",
+      delivery: {
+        announceReceipt: {
+          channel: "discord",
+          delivered: false,
+          error: "Discord API rejected the message",
+        },
+      },
+    });
+    const state = buildGatewayCronService({ cfg, deps: {} as CliDeps, broadcast: () => {} });
+    try {
+      const job = await state.cron.add({
+        name: "discord-announce-acknowledgement",
+        enabled: true,
+        schedule: { kind: "at", at: new Date(1).toISOString() },
+        sessionTarget: "isolated",
+        wakeMode: "now",
+        payload: { kind: "agentTurn", message: "announce" },
+        delivery: { mode: "announce", channel: "discord", to: "123" },
+      });
+
+      await state.cron.run(job.id, "force");
+
+      expect(state.cron.getJob(job.id)?.state).toMatchObject({
+        lastRunStatus: "error",
+        lastDeliveryStatus: "not-delivered",
+        lastDeliveryError: "Discord API rejected the message",
+      });
+    } finally {
+      state.cron.stop();
+    }
+  });
+
+  it("accepts a concrete Discord announce acknowledgement receipt", async () => {
+    const cfg = createCronConfig("server-cron-discord-announce-receipt");
+    loadConfigMock.mockReturnValue(cfg);
+    runCronIsolatedAgentTurnMock.mockResolvedValueOnce({
+      status: "ok",
+      summary: "done",
+      delivery: {
+        announceReceipt: {
+          channel: "discord",
+          delivered: true,
+          messageIds: ["discord-message-123"],
+          timestamps: [1_234],
+        },
+      },
+    });
+    const state = buildGatewayCronService({ cfg, deps: {} as CliDeps, broadcast: () => {} });
+    try {
+      const job = await state.cron.add({
+        name: "discord-announce-receipt",
+        enabled: true,
+        schedule: { kind: "every", everyMs: 60_000 },
+        sessionTarget: "isolated",
+        wakeMode: "now",
+        payload: { kind: "agentTurn", message: "announce" },
+        delivery: { mode: "announce", channel: "discord", to: "123" },
+      });
+
+      await state.cron.run(job.id, "force");
+
+      expect(state.cron.getJob(job.id)?.state).toMatchObject({
+        lastRunStatus: "ok",
+        lastDeliveryStatus: "delivered",
+        lastDelivered: true,
+      });
     } finally {
       state.cron.stop();
     }

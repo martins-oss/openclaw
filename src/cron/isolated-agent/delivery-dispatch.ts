@@ -134,6 +134,13 @@ export type DispatchCronDeliveryState = {
   result?: RunCronAgentTurnResult;
   delivered: boolean;
   deliveryAttempted: boolean;
+  announceReceipt?: {
+    channel: string;
+    delivered: boolean;
+    messageIds?: string[];
+    timestamps?: number[];
+    error?: string;
+  };
   summary?: string;
   outputText?: string;
   synthesizedText?: string;
@@ -450,6 +457,7 @@ export async function dispatchCronDelivery(
   let delivered = skipMessagingToolDelivery;
   let deliveryAttempted = skipMessagingToolDelivery;
   let directCronSessionDeleted = false;
+  let announceReceipt: DispatchCronDeliveryState["announceReceipt"];
   const formatDeliveryTargetError = (error: string) =>
     params.unverifiedMessagingToolDelivery === true
       ? `${error}; the agent used the message tool, but OpenClaw could not verify that message matched the cron delivery target`
@@ -580,6 +588,18 @@ export async function dispatchCronDelivery(
       if (cachedResults) {
         // Cached entries are only recorded after a successful non-empty delivery.
         delivered = true;
+        announceReceipt = {
+          channel: delivery.channel,
+          delivered: true,
+          messageIds: cachedResults.map((result) => result.messageId),
+          ...(cachedResults.some((result) => typeof result.timestamp === "number")
+            ? {
+                timestamps: cachedResults.flatMap((result) =>
+                  typeof result.timestamp === "number" ? [result.timestamp] : [],
+                ),
+              }
+            : {}),
+        };
         return null;
       }
       const deliverySession = buildOutboundSessionContext({
@@ -630,6 +650,19 @@ export async function dispatchCronDelivery(
         : await runDelivery();
       // Only mark delivered when ALL payloads succeeded (no partial failure).
       delivered = deliveryResults.length > 0 && !hadPartialFailure;
+      announceReceipt = {
+        channel: delivery.channel,
+        delivered,
+        ...(deliveryResults.length > 0
+          ? { messageIds: deliveryResults.map((result) => result.messageId) }
+          : {}),
+        ...(deliveryResults.some((result) => typeof result.timestamp === "number")
+          ? { timestamps: deliveryResults.flatMap((result) =>
+              typeof result.timestamp === "number" ? [result.timestamp] : [],
+            ) }
+          : {}),
+        ...(hadPartialFailure ? { error: "one or more announce payloads failed" } : {}),
+      };
       // Intentionally leave partial success uncached: replay may duplicate the
       // successful subset, but caching it here would permanently drop the
       // failed payloads by converting the replay into delivered=true.
@@ -649,6 +682,11 @@ export async function dispatchCronDelivery(
       }
       return null;
     } catch (err) {
+      announceReceipt = {
+        channel: delivery.channel,
+        delivered: false,
+        error: formatErrorMessage(err),
+      };
       if (!params.deliveryBestEffort) {
         return params.withRunSession({
           status: "error",
@@ -656,6 +694,7 @@ export async function dispatchCronDelivery(
           outputText,
           error: String(err),
           deliveryAttempted,
+          delivered: false,
           ...params.telemetry,
         });
       }
@@ -798,6 +837,7 @@ export async function dispatchCronDelivery(
           result: failDeliveryTarget(params.resolvedDelivery.error.message),
           delivered,
           deliveryAttempted,
+          announceReceipt,
           summary,
           outputText,
           synthesizedText,
@@ -815,6 +855,7 @@ export async function dispatchCronDelivery(
         }),
         delivered,
         deliveryAttempted,
+        announceReceipt,
         summary,
         outputText,
         synthesizedText,
@@ -834,6 +875,7 @@ export async function dispatchCronDelivery(
           result: directResult,
           delivered,
           deliveryAttempted,
+          announceReceipt,
           summary,
           outputText,
           synthesizedText,
@@ -847,6 +889,7 @@ export async function dispatchCronDelivery(
           result: finalizedTextResult,
           delivered,
           deliveryAttempted,
+          announceReceipt,
           summary,
           outputText,
           synthesizedText,
@@ -859,6 +902,7 @@ export async function dispatchCronDelivery(
   return {
     delivered,
     deliveryAttempted,
+    announceReceipt,
     summary,
     outputText,
     synthesizedText,
