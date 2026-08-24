@@ -103,12 +103,16 @@ export function setupCronServiceSuite(options?: { prefix?: string; baseTimeIso?:
 export function createFinishedBarrier() {
   const resolvers = new Map<string, (evt: CronEvent) => void>();
   return {
+    waitForFinished: (jobId: string) =>
+      new Promise<CronEvent>((resolve) => {
+        resolvers.set(jobId, resolve);
+      }),
     waitForOk: (jobId: string) =>
       new Promise<CronEvent>((resolve) => {
         resolvers.set(jobId, resolve);
       }),
     onEvent: (evt: CronEvent) => {
-      if (evt.action !== "finished" || evt.status !== "ok") {
+      if (evt.action !== "finished") {
         return;
       }
       const resolve = resolvers.get(evt.jobId);

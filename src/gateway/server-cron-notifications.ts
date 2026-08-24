@@ -35,6 +35,11 @@ type CronWebhookTarget = {
   source: "delivery" | "legacy";
 };
 
+export type CronPostDeliveryReceipt = {
+  delivered: boolean;
+  error?: string;
+};
+
 function redactWebhookUrl(url: string): string {
   try {
     const parsed = new URL(url);
@@ -83,14 +88,14 @@ async function postCronWebhook(params: {
   blockedLog: string;
   failedLog: string;
   logger: CronLogger;
-}): Promise<void> {
+}): Promise<CronPostDeliveryReceipt> {
   const abortController = new AbortController();
   const timeout = setTimeout(() => {
     abortController.abort();
   }, CRON_WEBHOOK_TIMEOUT_MS);
 
   try {
-    const result = await fetchWithSsrFGuard({
+    const { response, release } = await fetchWithSsrFGuard({
       url: params.webhookUrl,
       init: {
         method: "POST",
@@ -99,13 +104,30 @@ async function postCronWebhook(params: {
         signal: abortController.signal,
       },
     });
-    await result.release();
+    try {
+      if (!response.ok) {
+        const error = `webhook returned HTTP ${response.status}`;
+        params.logger.warn(
+          {
+            ...params.logContext,
+            error,
+            webhookUrl: redactWebhookUrl(params.webhookUrl),
+          },
+          params.failedLog,
+        );
+        return { delivered: false, error };
+      }
+      return { delivered: true };
+    } finally {
+      await release();
+    }
   } catch (err) {
+    const error = formatErrorMessage(err);
     if (err instanceof SsrFBlockedError) {
       params.logger.warn(
         {
           ...params.logContext,
-          reason: formatErrorMessage(err),
+          reason: error,
           webhookUrl: redactWebhookUrl(params.webhookUrl),
         },
         params.blockedLog,
@@ -114,12 +136,13 @@ async function postCronWebhook(params: {
       params.logger.warn(
         {
           ...params.logContext,
-          err: formatErrorMessage(err),
+          err: error,
           webhookUrl: redactWebhookUrl(params.webhookUrl),
         },
         params.failedLog,
       );
     }
+    return { delivered: false, error };
   } finally {
     clearTimeout(timeout);
   }
@@ -193,7 +216,7 @@ export async function sendGatewayCronFailureAlert(params: {
   });
 }
 
-export function dispatchGatewayCronFinishedNotifications(params: {
+export async function dispatchGatewayCronFinishedNotifications(params: {
   evt: CronEvent;
   job?: CronJob;
   deps: CliDeps;
@@ -203,7 +226,9 @@ export function dispatchGatewayCronFinishedNotifications(params: {
   legacyWebhook?: unknown;
   globalFailureDestination?: CronFailureDestinationConfig;
   warnedLegacyWebhookJobs: Set<string>;
-}): void {
+  deliverPrimaryWebhook?: boolean;
+  notifyFailureDestination?: boolean;
+}): Promise<CronPostDeliveryReceipt | undefined> {
   const webhookToken = normalizeOptionalString(params.webhookToken);
   const legacyWebhook = normalizeOptionalString(params.legacyWebhook);
   const legacyNotify = (params.job as { notify?: unknown } | undefined)?.notify === true;
@@ -216,7 +241,9 @@ export function dispatchGatewayCronFinishedNotifications(params: {
     legacyWebhook,
   });
 
-  if (!webhookTarget && params.job?.delivery?.mode === "webhook") {
+  const deliverPrimaryWebhook = params.deliverPrimaryWebhook !== false;
+  if (deliverPrimaryWebhook && !webhookTarget && params.job?.delivery?.mode === "webhook") {
+    const error = "webhook delivery requires a valid http(s) delivery.to URL";
     params.logger.warn(
       {
         jobId: params.evt.jobId,
@@ -224,9 +251,14 @@ export function dispatchGatewayCronFinishedNotifications(params: {
       },
       "cron: skipped webhook delivery, delivery.to must be a valid http(s) URL",
     );
+    return { delivered: false, error };
   }
 
-  if (webhookTarget?.source === "legacy" && !params.warnedLegacyWebhookJobs.has(params.evt.jobId)) {
+  if (
+    deliverPrimaryWebhook &&
+    webhookTarget?.source === "legacy" &&
+    !params.warnedLegacyWebhookJobs.has(params.evt.jobId)
+  ) {
     params.warnedLegacyWebhookJobs.add(params.evt.jobId);
     params.logger.warn(
       {
@@ -237,29 +269,40 @@ export function dispatchGatewayCronFinishedNotifications(params: {
     );
   }
 
-  if (webhookTarget && params.evt.summary) {
-    void (async () => {
-      await postCronWebhook({
-        webhookUrl: webhookTarget.url,
-        webhookToken,
-        payload: params.evt,
-        logContext: { jobId: params.evt.jobId },
-        blockedLog: "cron: webhook delivery blocked by SSRF guard",
-        failedLog: "cron: webhook delivery failed",
-        logger: params.logger,
-      });
-    })();
+  if (deliverPrimaryWebhook && webhookTarget && !params.evt.summary) {
+    const error = "webhook delivery requires a finished-event summary";
+    params.logger.warn(
+      { jobId: params.evt.jobId },
+      "cron: skipped webhook delivery because finished event has no summary",
+    );
+    return { delivered: false, error };
   }
 
-  dispatchCronFailureDestinationNotifications({
-    evt: params.evt,
-    job: params.job,
-    deps: params.deps,
-    logger: params.logger,
-    resolveCronAgent: params.resolveCronAgent,
-    webhookToken,
-    globalFailureDestination: params.globalFailureDestination,
-  });
+  const receipt =
+    deliverPrimaryWebhook && webhookTarget
+      ? await postCronWebhook({
+          webhookUrl: webhookTarget.url,
+          webhookToken,
+          payload: params.evt,
+          logContext: { jobId: params.evt.jobId },
+          blockedLog: "cron: webhook delivery blocked by SSRF guard",
+          failedLog: "cron: webhook delivery failed",
+          logger: params.logger,
+        })
+      : undefined;
+
+  if (params.notifyFailureDestination !== false) {
+    dispatchCronFailureDestinationNotifications({
+      evt: params.evt,
+      job: params.job,
+      deps: params.deps,
+      logger: params.logger,
+      resolveCronAgent: params.resolveCronAgent,
+      webhookToken,
+      globalFailureDestination: params.globalFailureDestination,
+    });
+  }
+  return receipt;
 }
 
 function dispatchCronFailureDestinationNotifications(params: {

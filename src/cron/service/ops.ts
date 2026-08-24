@@ -32,6 +32,7 @@ import { locked } from "./locked.js";
 import type { CronServiceState } from "./state.js";
 import { ensureLoaded, persist, warnIfDisabled } from "./store.js";
 import {
+  acknowledgeFinalizedCronDelivery,
   applyJobResult,
   armTimer,
   emit,
@@ -672,6 +673,14 @@ async function finishPreparedManualRun(
     coreResult = { status: "error", error: normalizeCronRunErrorText(err) };
   }
   const endedAt = state.deps.nowMs();
+  coreResult = await acknowledgeFinalizedCronDelivery({
+    state,
+    job: executionJob,
+    result: coreResult,
+    startedAt,
+    endedAt,
+    preserveSchedule: mode === "force",
+  });
   tryFinishManualTaskRun(state, {
     taskRunId,
     coreResult,
