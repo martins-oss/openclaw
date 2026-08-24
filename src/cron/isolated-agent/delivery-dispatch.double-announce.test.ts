@@ -636,7 +636,9 @@ describe("dispatchCronDelivery — double-announce guard", () => {
   it("keeps direct announce delivery idempotent across replay for the same cron execution", async () => {
     vi.mocked(countActiveDescendantRuns).mockReturnValue(0);
     vi.mocked(isLikelyInterimCronMessage).mockReturnValue(false);
-    vi.mocked(deliverOutboundPayloads).mockResolvedValue([{ ok: true } as never]);
+    vi.mocked(deliverOutboundPayloads).mockResolvedValue([
+      { ok: true, messageId: "discord-message-123", timestamp: 1_234 } as never,
+    ]);
 
     const params = makeBaseParams({ synthesizedText: "Replay-safe cron update." });
     const first = await dispatchCronDelivery(params);
@@ -645,6 +647,12 @@ describe("dispatchCronDelivery — double-announce guard", () => {
     expect(first.delivered).toBe(true);
     expect(second.delivered).toBe(true);
     expect(second.deliveryAttempted).toBe(true);
+    expect(second.announceReceipt).toEqual({
+      channel: "telegram",
+      delivered: true,
+      messageIds: ["discord-message-123"],
+      timestamps: [1_234],
+    });
     expect(deliverOutboundPayloads).toHaveBeenCalledTimes(1);
   });
 

@@ -588,6 +588,18 @@ export async function dispatchCronDelivery(
       if (cachedResults) {
         // Cached entries are only recorded after a successful non-empty delivery.
         delivered = true;
+        announceReceipt = {
+          channel: delivery.channel,
+          delivered: true,
+          messageIds: cachedResults.map((result) => result.messageId),
+          ...(cachedResults.some((result) => typeof result.timestamp === "number")
+            ? {
+                timestamps: cachedResults.flatMap((result) =>
+                  typeof result.timestamp === "number" ? [result.timestamp] : [],
+                ),
+              }
+            : {}),
+        };
         return null;
       }
       const deliverySession = buildOutboundSessionContext({
