@@ -67,6 +67,14 @@ export type CronDeliveryTrace = {
   messageToolSentTo?: CronDeliveryTraceMessageTarget[];
   fallbackUsed?: boolean;
   delivered?: boolean;
+  /** Concrete transport receipt for scheduler-owned announce delivery. */
+  announceReceipt?: {
+    channel: string;
+    delivered: boolean;
+    messageIds?: string[];
+    timestamps?: number[];
+    error?: string;
+  };
 };
 
 export type CronDeliveryPreview = {

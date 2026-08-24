@@ -966,6 +966,7 @@ async function finalizeCronRun(params: {
     matchesMessagingToolDeliveryTarget,
     fallbackUsed: deliveryResult.deliveryAttempted && !skipMessagingToolDelivery,
     delivered: deliveryResult.delivered,
+    ...(deliveryResult.announceReceipt ? { announceReceipt: deliveryResult.announceReceipt } : {}),
   });
   if (deliveryResult.result) {
     const resultWithDeliveryMeta: RunCronAgentTurnResult = {

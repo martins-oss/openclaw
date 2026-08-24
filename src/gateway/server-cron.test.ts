@@ -663,4 +663,41 @@ describe("buildGatewayCronService", () => {
       state.cron.stop();
     }
   });
+
+  it("persists a required Discord announce acknowledgement failure", async () => {
+    const cfg = createCronConfig("server-cron-discord-announce-ack");
+    loadConfigMock.mockReturnValue(cfg);
+    runCronIsolatedAgentTurnMock.mockResolvedValueOnce({
+      status: "ok",
+      summary: "done",
+      delivery: {
+        announceReceipt: {
+          channel: "discord",
+          delivered: false,
+          error: "Discord API rejected the message",
+        },
+      },
+    });
+    const state = buildGatewayCronService({ cfg, deps: {} as CliDeps, broadcast: () => {} });
+    try {
+      const job = await state.cron.add({
+        name: "discord-announce-acknowledgement",
+        enabled: true,
+        schedule: { kind: "at", at: new Date(1).toISOString() },
+        sessionTarget: "isolated",
+        payload: { kind: "agentTurn", message: "announce" },
+        delivery: { mode: "announce", channel: "discord", to: "123" },
+      });
+
+      await state.cron.run(job.id, "force");
+
+      expect(state.cron.getJob(job.id)?.state).toMatchObject({
+        lastRunStatus: "error",
+        lastDeliveryStatus: "not-delivered",
+        lastDeliveryError: "Discord API rejected the message",
+      });
+    } finally {
+      state.cron.stop();
+    }
+  });
 });

@@ -229,6 +229,16 @@ export async function dispatchGatewayCronFinishedNotifications(params: {
   deliverPrimaryWebhook?: boolean;
   notifyFailureDestination?: boolean;
 }): Promise<CronPostDeliveryReceipt | undefined> {
+  const announceReceipt = params.evt.delivery?.announceReceipt;
+  if (
+    params.job?.delivery?.mode === "announce" &&
+    params.job.delivery.channel === "discord" &&
+    announceReceipt?.channel === "discord"
+  ) {
+    return announceReceipt.delivered
+      ? { delivered: true }
+      : { delivered: false, error: announceReceipt.error ?? "Discord announce delivery failed" };
+  }
   const webhookToken = normalizeOptionalString(params.webhookToken);
   const legacyWebhook = normalizeOptionalString(params.legacyWebhook);
   const legacyNotify = (params.job as { notify?: unknown } | undefined)?.notify === true;
